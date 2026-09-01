@@ -1,0 +1,15 @@
+defaults:
+  - _self_
+  - text_embedding: default
+  - encoder: nano
+  - duration_predictor: nano
+  - pitch_predictor: nano
+  - decoder: nano
+
+_target_: optispeech.model.generator.OptiSpeechGenerator
+_partial_: true
+segment_size: 64
+loss_coeffs:
+  lambda_align: 5.0
+  lambda_duration: 1.0
+  lambda_pitch: 1.0

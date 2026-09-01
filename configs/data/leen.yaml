@@ -1,0 +1,21 @@
+defaults:
+  - base
+  - _self_
+  - override text_processor: mantoq
+
+_target_: optispeech.dataset.TextWavDataModule
+name: leen
+train_filelist_path: data/leen/train.txt
+valid_filelist_path: data/leen/val.txt
+batch_size: 16
+data_statistics:  # Computed for this dataset with the params of the above feature extractor
+  pitch_min: 57.30711
+  pitch_max: 848.357971
+  pitch_mean: 215.504837
+  pitch_std: 43.69474
+  energy_min: 0.0
+  energy_max: 296.496307
+  energy_mean: 62.180599
+  energy_std: 48.980488
+  mel_mean: -5.412835
+  mel_std: 2.536111

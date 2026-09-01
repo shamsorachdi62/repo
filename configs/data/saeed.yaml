@@ -1,0 +1,21 @@
+defaults:
+  - base
+  - _self_
+  - override text_processor: mantoq
+
+_target_: optispeech.dataset.TextWavDataModule
+name: saeed
+train_filelist_path: data/saeed/train.txt
+valid_filelist_path: data/saeed/val.txt
+batch_size: 16
+data_statistics:  # Computed for this dataset with the params of the above feature extractor
+  pitch_min: 57.731743
+  pitch_max: 819.658203
+  pitch_mean: 133.929535
+  pitch_std: 38.468456
+  energy_min: 0.000716
+  energy_max: 272.765991
+  energy_mean: 59.001228
+  energy_std: 43.89827
+  mel_mean: -5.039494
+  mel_std: 2.726398

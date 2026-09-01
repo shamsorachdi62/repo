@@ -1,0 +1,8 @@
+include README.md
+include LICENSE.txt
+include requirements.*.txt
+include *.cff
+recursive-include optispeech *.py
+recursive-include optispeech *.pyx
+recursive-exclude tests *
+prune tests*

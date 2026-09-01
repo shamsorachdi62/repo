@@ -1,0 +1,29 @@
+defaults:
+  - _self_
+  - generator: default
+  - discriminator: vocos
+  - optimizer: adamw
+  - scheduler: cosine_with_warmup
+  - vocoder: nano
+
+_target_: optispeech.model.OptiSpeech
+dim: 256
+train_args:
+  cache_generator_outputs: false
+  gradient_clip_val: 10.0
+  gradient_accumulate_batches: null
+  pretraining_steps: 1000
+  evaluate_periodicity: false
+  evaluate_utmos: false
+  evaluate_pesq: false
+data_args:
+  name: ${data.name}
+  num_speakers: ${data.num_speakers}
+  text_processor: ${data.text_processor}
+  feature_extractor: ${data.feature_extractor}
+  batch_size: ${data.batch_size}
+  data_statistics: ${data.data_statistics}
+inference_args:
+  d_factor: 1.1
+  p_factor: 1.6
+  pause_factor: 2.0

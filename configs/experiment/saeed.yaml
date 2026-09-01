@@ -1,0 +1,15 @@
+# @package _global_
+
+# to execute this experiment run:
+# python -m optispeech.train experiment=saeed
+
+defaults:
+  - override /data: saeed
+  - override /model: nano
+
+# all parameters below will be merged with parameters from default configurations set above
+# this allows you to overwrite only specified parameters
+
+tags: ["saeed", "light", "arabic", "single_speaker", "male", "ar",]
+
+run_name: saeed

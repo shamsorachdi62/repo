@@ -1,0 +1,165 @@
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+import lightning
+import numpy as np
+import rootutils
+import torch
+from hydra import compose, initialize
+from omegaconf import DictConfig, open_dict
+from torch import nn
+from tqdm.auto import tqdm
+
+from optispeech.dataset.text_wav_datamodule import TextWavDataModule
+from optispeech.utils import pylogger
+from optispeech.utils.generic import to_numpy
+
+log = pylogger.get_pylogger(__name__)
+
+
+def calculate_data_statistics(dataset: torch.utils.data.Dataset, output_dir: Path, cfg: DictConfig, save_stats=True):
+    # Pitch stats
+    pitch_min = float("inf")
+    pitch_max = -float("inf")
+    pitch_sum = 0
+    pitch_sq_sum = 0
+
+    # Energy stats
+    energy_min = float("inf")
+    energy_max = -float("inf")
+    energy_sum = 0
+    energy_sq_sum = 0
+
+    # Mel stats
+    mel_sum = 0
+    mel_sq_sum = 0
+    total_mel_len = 0
+
+    # Benefit of doing it over batch is the added speed due to multiprocessing
+    for batch in tqdm(dataset, desc="Calculating"):
+        for i in range(batch["x"].shape[0]):
+            mel_len = batch["mel_lengths"][i]
+            mel_spec = batch["mel"][i][:, :mel_len]
+            pitch = batch["pitches"][i][:mel_len]
+            pitch_min = min(pitch_min, torch.min(pitch).item())
+            pitch_max = max(pitch_max, torch.max(pitch).item())
+            energy = batch["energies"][i][:mel_len]
+            energy_min = min(energy_min, torch.min(energy).item())
+            energy_max = max(energy_max, torch.max(energy).item())
+            # normalisation statistics
+            pitch_sum += torch.sum(pitch)
+            pitch_sq_sum += torch.sum(torch.pow(pitch, 2))
+            energy_sum += torch.sum(energy)
+            energy_sq_sum += torch.sum(torch.pow(energy, 2))
+            mel_sum += torch.sum(mel_spec)
+            mel_sq_sum += torch.sum(mel_spec**2)
+            total_mel_len += mel_len
+
+    # Save normalisation statistics
+    pitch_mean = pitch_sum / total_mel_len
+    pitch_std = torch.sqrt((pitch_sq_sum / total_mel_len) - torch.pow(pitch_mean, 2))
+
+    energy_mean = energy_sum / total_mel_len
+    energy_std = torch.sqrt((energy_sq_sum / total_mel_len) - torch.pow(energy_mean, 2))
+
+    mel_mean = mel_sum / (total_mel_len * cfg.feature_extractor.n_feats)
+    mel_std = torch.sqrt((mel_sq_sum / (total_mel_len * cfg.feature_extractor.n_feats)) - torch.pow(mel_mean, 2))
+
+    stats = {
+        "pitch_min": round(pitch_min, 6),
+        "pitch_max": round(pitch_max, 6),
+        "pitch_mean": round(pitch_mean.item(), 6),
+        "pitch_std": round(pitch_std.item(), 6),
+        "energy_min": round(energy_min, 6),
+        "energy_max": round(energy_max, 6),
+        "energy_mean": round(energy_mean.item(), 6),
+        "energy_std": round(energy_std.item(), 6),
+        "mel_mean": round(mel_mean.item(), 6),
+        "mel_std": round(mel_std.item(), 6),
+    }
+
+    print("\n".join([f"  {k}: {v}" for k, v in stats.items()]))
+
+    if save_stats:
+        with open(output_dir / "stats.json", "w") as f:
+            json.dump(stats, f, indent=4)
+        log.info("[+] Done! features saved to: ", output_dir)
+    else:
+        log.info("Stats not saved!")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "input_config",
+        type=str,
+        help="The name of the yaml config file under configs/data",
+    )
+    parser.add_argument(
+        "-b",
+        "--batch-size",
+        type=int,
+        default="32",
+        help="Can have increased batch size for faster computation",
+    )
+    parser.add_argument(
+        "-w",
+        "--num-workers",
+        type=int,
+        default=os.cpu_count(),
+        help="Can have more workers for faster computation",
+    )
+    parser.add_argument(
+        "-f",
+        "--force",
+        action="store_true",
+        default=False,
+        required=False,
+        help="force overwrite the file",
+    )
+    parser.add_argument(
+        "-o",
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Output directory to save the data statistics",
+    )
+    args = parser.parse_args()
+
+    with initialize(version_base="1.3", config_path="../../configs/data"):
+        cfg = compose(config_name=args.input_config, return_hydra_config=True, overrides=[])
+
+    root_path = rootutils.find_root(search_from=__file__, indicator=".project-root")
+
+    with open_dict(cfg):
+        del cfg["hydra"]
+        del cfg["_target_"]
+        cfg["seed"] = 1234
+        cfg["batch_size"] = args.batch_size
+        cfg["train_filelist_path"] = str(os.path.join(root_path, cfg["train_filelist_path"]))
+        cfg["valid_filelist_path"] = str(os.path.join(root_path, cfg["valid_filelist_path"]))
+        cfg["num_workers"] = args.num_workers
+
+    if args.output_dir is not None:
+        output_dir = Path(args.output_dir)
+    else:
+        output_dir = Path(cfg["train_filelist_path"]).parent
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    log.info(f"Preprocessing: {cfg['name']} from training filelist: {cfg['train_filelist_path']}")
+    text_wav_datamodule = TextWavDataModule(**cfg)
+    text_wav_datamodule.setup()
+    log.info("Computing stats for training set if exists...")
+    train_dataloader = text_wav_datamodule.train_dataloader(do_normalize=False)
+    calculate_data_statistics(train_dataloader, output_dir, cfg, save_stats=True)
+
+    log.info(f"[+] Done! features saved to: {output_dir}")
+
+
+if __name__ == "__main__":
+    main()

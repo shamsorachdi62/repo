@@ -1,0 +1,3 @@
+_target_: optispeech.model.generator.modules.nano_layers.PhoneEncoder
+_partial_: true
+max_position: 16

@@ -1,0 +1,2 @@
+_target_: optispeech.model.generator.modules.nano_layers.AcousticDecoder
+_partial_: true

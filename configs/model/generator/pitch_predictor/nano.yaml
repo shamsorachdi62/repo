@@ -1,0 +1,4 @@
+_target_: optispeech.model.generator.modules.nano_layers.PitchPredictor
+_partial_: true
+embed_kernel_size: 3
+embed_dropout: 0.2

@@ -1,0 +1,31 @@
+from setuptools import setup, find_packages
+
+setup(
+    name="optispeech",
+    version="1.0.0",
+    description="Lightweight End-to-End text-to-speech engine",
+    packages=find_packages(),
+    python_requires=">=3.10",
+    install_requires=[
+        "torch>=2.0.0",
+        "torchaudio>=2.0.0",
+        "lightning>=2.0.0",
+        "torchmetrics>=0.11.4",
+        "nnaudio>=0.3.3",
+        "pyworld>=0.3.4",
+        "hydra-core>=1.3.2",
+        "hydra-colorlog>=1.2.0",
+        "rootutils>=1.0.7",
+        "rich>=13.7.1",
+        "librosa>=0.9.2",
+        "einops>=0.8.0",
+        "unidecode>=1.3.8",
+        "scipy>=1.14.0",
+        "pandas>=2.2.2",
+        "transformers>=4.44.0",
+        "tqdm>=4.66.5",
+        "onnx>=1.16.2",
+        "onnxruntime>=1.18.1",
+        "numpy>=1.24.0",
+    ],
+)

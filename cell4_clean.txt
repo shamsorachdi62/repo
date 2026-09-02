@@ -1,20 +1,51 @@
-if not hf_marker_exists(MARKER_METADATA_DONE):
-    meta_path = os.path.join(LOCAL_METADATA_DIR, "_all_metadata.json")
-    all_rows = json.load(open(meta_path, encoding='utf-8')) if os.path.exists(meta_path) else []
-    valid_wav_stems = {Path(f).stem for f in os.listdir(LOCAL_CONVERTED_WAV) if f.endswith('.wav') and is_valid_audio(os.path.join(LOCAL_CONVERTED_WAV, f))}
-    valid_entries = [(fid, text.strip()) for fid, text in all_rows if fid in valid_wav_stems and text and text.strip()] if all_rows else [(stem, stem) for stem in sorted(valid_wav_stems)]
-    random.seed(42)
-    random.shuffle(valid_entries)
-    val_count = max(1, int(len(valid_entries) * 0.05))
-    val_entries = valid_entries[:val_count]
-    train_entries = valid_entries[val_count:]
-    for fname, entries in [("train.csv", train_entries), ("val.csv", val_entries)]:
-        fpath = os.path.join(LOCAL_RAW_DATASET, fname)
-        with open(fpath, 'w', encoding='utf-8', newline='\n') as f:
-            for fid, text in entries:
-                f.write(f"{fid}|{text.replace('|', ' ')}\n")
-        hf_upload_file(fpath, f"{HF_RAW_PREFIX}/{fname}")
-    hf_set_marker(MARKER_METADATA_DONE)
-    hf_invalidate_cache()
+QUANTIZE_INT8 = True
+TEST_TEXT = "مرحبا، هذا اختبار لنموذج التحويل الصوتي."
 
-print("Cell 4 Complete: train.csv and val.csv metadata split created and synced.")
+import os, sys, glob, subprocess, shutil
+os.chdir(LOCAL_REPO)
+os.environ["PROJECT_ROOT"] = LOCAL_REPO
+
+if 'hf_list_files' not in globals():
+    _cached_repo_files = None
+    def hf_list_files(path_prefix):
+        global _cached_repo_files
+        if _cached_repo_files is None:
+            try:
+                _cached_repo_files = [f.rfilename for f in hf_api.list_repo_tree(repo_id=HF_BACKUP_REPO, repo_type="model", recursive=True) if hasattr(f, "rfilename")]
+            except Exception:
+                _cached_repo_files = []
+        return [f for f in _cached_repo_files if f.startswith(path_prefix)]
+
+ckpts = sorted(glob.glob(os.path.join(LOCAL_CHECKPOINTS, "**", "*.ckpt"), recursive=True), key=os.path.getmtime)
+if not ckpts:
+    hf_ckpt_files = [f for f in hf_list_files(HF_CHECKPOINTS_PREFIX) if f.endswith(".ckpt")]
+    if hf_ckpt_files:
+        target_hf_file = f"{HF_CHECKPOINTS_PREFIX}/last.ckpt" if f"{HF_CHECKPOINTS_PREFIX}/last.ckpt" in hf_ckpt_files else sorted(hf_ckpt_files)[-1]
+        local_path = hf_hub_download(repo_id=HF_BACKUP_REPO, filename=target_hf_file, repo_type="model", local_dir=KAGGLE_WORKING, token=ACTIVE_HF_TOKEN)
+        dest = os.path.join(LOCAL_CHECKPOINTS, os.path.basename(target_hf_file))
+        os.makedirs(LOCAL_CHECKPOINTS, exist_ok=True)
+        if os.path.abspath(local_path) != os.path.abspath(dest):
+            shutil.copy2(local_path, dest)
+            if os.path.exists(local_path):
+                try:
+                    os.remove(local_path)
+                except Exception:
+                    pass
+        ckpts = sorted(glob.glob(os.path.join(LOCAL_CHECKPOINTS, "**", "*.ckpt"), recursive=True), key=os.path.getmtime)
+
+if ckpts:
+    checkpoint_path = ckpts[-1]
+    export_cmd = [sys.executable, "-m", "optispeech.onnx.nano_streaming", "--checkpoint", checkpoint_path, "--output-dir", LOCAL_ONNX_EXPORT, "--text", TEST_TEXT]
+    if QUANTIZE_INT8:
+        export_cmd.append("--quantize-encoder-decoder")
+    res = subprocess.run(export_cmd, cwd=LOCAL_REPO)
+    if res.returncode == 0:
+        old_onnx = hf_list_files(HF_ONNX_PREFIX)
+        if old_onnx:
+            hf_delete_files(old_onnx)
+        hf_upload_folder(LOCAL_ONNX_EXPORT, HF_ONNX_PREFIX)
+        print("Cell 4 Complete: ONNX models exported & uploaded to Hugging Face successfully.")
+    else:
+        print("ONNX export failed.")
+else:
+    print("No checkpoint found for ONNX export.")

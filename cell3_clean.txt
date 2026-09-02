@@ -1,230 +1,140 @@
-import os, sys, glob, json, shutil, random, re, subprocess
-from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import soundfile as sf
-import numpy as np
+os.chdir(LOCAL_REPO)
+os.environ["PROJECT_ROOT"] = LOCAL_REPO
 
-def is_valid_audio(audio_path):
-    try:
-        if not os.path.exists(audio_path) or os.path.getsize(audio_path) < 100:
-            return False
-        info = sf.info(audio_path)
-        return info.duration >= 0.1 and info.frames > 0
-    except Exception:
-        return False
-
-def convert_audio_robust(src_path, dst_path, target_sr=SAMPLE_RATE):
-    try:
-        import soxr
-        import librosa
-        wav, sr = librosa.load(src_path, sr=None, mono=True)
-        if len(wav) > 0 and np.isfinite(wav).all():
-            if sr != target_sr:
-                wav = soxr.resample(wav, sr, target_sr)
-            sf.write(dst_path, wav, target_sr, subtype='PCM_16')
-            if is_valid_audio(dst_path):
-                return True
-    except Exception:
-        pass
-    try:
-        from pydub import AudioSegment
-        audio = AudioSegment.from_file(src_path)
-        audio = audio.set_frame_rate(target_sr).set_channels(1).set_sample_width(2)
-        audio.export(dst_path, format="wav")
-        if is_valid_audio(dst_path):
+if 'ensure_filelists_exist' not in globals():
+    def ensure_filelists_exist(preprocessed_dir, raw_dataset_dir):
+        data_dir = os.path.join(preprocessed_dir, "data")
+        train_txt = os.path.join(preprocessed_dir, "train.txt")
+        val_txt = os.path.join(preprocessed_dir, "val.txt")
+        if os.path.exists(train_txt) and os.path.getsize(train_txt) > 0:
             return True
-    except Exception:
-        pass
-    try:
-        subprocess.run(
-            ["ffmpeg", "-y", "-v", "error", "-i", str(src_path),
-             "-ar", str(target_sr), "-ac", "1", "-sample_fmt", "s16", str(dst_path)],
-            check=True, capture_output=True
-        )
-        return is_valid_audio(dst_path)
-    except Exception:
-        return False
-
-has_raw_hf = hf_marker_exists(MARKER_CONVERT_DONE) or len(hf_list_files(f"{HF_RAW_PREFIX}/wav")) > 0
-if has_raw_hf:
-    existing_wavs = glob.glob(os.path.join(LOCAL_CONVERTED_WAV, "*.wav"))
-    if not existing_wavs:
-        hf_download_folder(HF_RAW_PREFIX, KAGGLE_WORKING)
-        restored = glob.glob(os.path.join(KAGGLE_WORKING, HF_RAW_PREFIX, "wav", "*.wav"))
-        if restored:
-            os.makedirs(LOCAL_CONVERTED_WAV, exist_ok=True)
-            for f in restored:
-                dest = os.path.join(LOCAL_CONVERTED_WAV, os.path.basename(f))
-                if os.path.abspath(f) != os.path.abspath(dest):
-                    shutil.copy2(f, dest)
-        meta_src = os.path.join(KAGGLE_WORKING, HF_RAW_PREFIX, "_all_metadata.json")
-        meta_dst = os.path.join(LOCAL_METADATA_DIR, "_all_metadata.json")
-        if os.path.exists(meta_src) and os.path.abspath(meta_src) != os.path.abspath(meta_dst):
-            os.makedirs(LOCAL_METADATA_DIR, exist_ok=True)
-            shutil.copy2(meta_src, meta_dst)
-        for csv_name in ["train.csv", "val.csv"]:
-            csv_src = os.path.join(KAGGLE_WORKING, HF_RAW_PREFIX, csv_name)
-            csv_dst = os.path.join(LOCAL_RAW_DATASET, csv_name)
-            if os.path.exists(csv_src) and os.path.abspath(csv_src) != os.path.abspath(csv_dst):
-                shutil.copy2(csv_src, csv_dst)
-else:
-    _ds_loaded_via_lib = False
-    try:
-        from datasets import load_dataset
-        load_kwargs = {"trust_remote_code": True}
-        if ACTIVE_HF_TOKEN:
-            load_kwargs["token"] = ACTIVE_HF_TOKEN
-        ds = load_dataset(HF_DATASET_ID, **load_kwargs)
-        _ds_loaded_via_lib = True
-    except Exception:
-        snapshot_download(
-            repo_id=HF_DATASET_ID, repo_type="dataset",
-            local_dir=os.path.join(LOCAL_RAW_DATASET, "_hf_snapshot"),
-            token=ACTIVE_HF_TOKEN or None,
-        )
-
-    converted, corrupted_skipped, metadata_rows = 0, 0, []
-    if _ds_loaded_via_lib:
-        try:
-            from datasets import Audio
-        except ImportError:
-            Audio = None
-        for split_name in ds:
-            split = ds[split_name]
-            audio_col = next((c for c in split.column_names if c in ('audio', 'speech', 'wav', 'sound', 'recording')), None)
-            text_col = next((c for c in split.column_names if c in ('text', 'sentence', 'transcription', 'transcript', 'utterance')), None)
-            if not audio_col or not text_col:
-                continue
-            if Audio is not None:
-                try:
-                    split = split.cast_column(audio_col, Audio(decode=False))
-                except Exception:
-                    pass
-            samples_list = list(split)
-            def process_sample(args):
-                idx, sample = args
-                file_id = f"{split_name}_{idx:06d}"
-                wav_path = os.path.join(LOCAL_CONVERTED_WAV, f"{file_id}.wav")
-                text = str(sample[text_col] or "").strip()
-                if not text:
-                    return None
-                if os.path.exists(wav_path) and is_valid_audio(wav_path):
-                    return (file_id, text, True)
-                audio_data = sample[audio_col]
-                success = False
-                if isinstance(audio_data, dict):
-                    if audio_data.get('bytes'):
-                        tmp_p = f"/tmp/_tmp_{idx}.bin"
-                        with open(tmp_p, 'wb') as f:
-                            f.write(audio_data['bytes'])
-                        success = convert_audio_robust(tmp_p, wav_path)
-                        if os.path.exists(tmp_p):
-                            os.remove(tmp_p)
-                    elif audio_data.get('path') and os.path.isfile(audio_data['path']):
-                        success = convert_audio_robust(audio_data['path'], wav_path)
-                    elif 'array' in audio_data:
-                        try:
-                            arr = np.array(audio_data['array'], dtype=np.float32)
-                            sr = audio_data['sampling_rate']
-                            if sr != SAMPLE_RATE:
-                                try:
-                                    import soxr
-                                    arr = soxr.resample(arr, sr, SAMPLE_RATE)
-                                except Exception:
-                                    import librosa
-                                    arr = librosa.resample(arr, orig_sr=sr, target_sr=SAMPLE_RATE, res_type='kaiser_fast')
-                            sf.write(wav_path, arr, SAMPLE_RATE, subtype='PCM_16')
-                            success = is_valid_audio(wav_path)
-                        except Exception:
-                            success = False
-                elif isinstance(audio_data, str) and os.path.isfile(audio_data):
-                    success = convert_audio_robust(audio_data, wav_path)
-                elif isinstance(audio_data, bytes):
-                    tmp_p = f"/tmp/_tmp_{idx}.bin"
-                    with open(tmp_p, 'wb') as f:
-                        f.write(audio_data)
-                    success = convert_audio_robust(tmp_p, wav_path)
-                    if os.path.exists(tmp_p):
-                        os.remove(tmp_p)
-                if success:
-                    return (file_id, text, True)
-                else:
-                    if os.path.exists(wav_path):
-                        os.remove(wav_path)
-                    return (file_id, text, False)
-
-            with ThreadPoolExecutor(max_workers=PREPROCESS_WORKERS) as executor:
-                futures = [executor.submit(process_sample, (idx, sample)) for idx, sample in enumerate(samples_list)]
-                for fut in as_completed(futures):
-                    res = fut.result()
-                    if res:
-                        fid, txt, ok = res
-                        if ok:
-                            metadata_rows.append((fid, txt))
-                            converted += 1
-                        else:
-                            corrupted_skipped += 1
-        del ds
-    else:
-        snapshot_dir = os.path.join(LOCAL_RAW_DATASET, "_hf_snapshot")
-        import zipfile, tarfile
-        for root, _, files in os.walk(snapshot_dir):
-            for f in files:
-                fp = os.path.join(root, f)
-                try:
-                    if f.endswith('.zip'):
-                        with zipfile.ZipFile(fp, 'r') as z: z.extractall(root)
-                    elif f.endswith(('.tar.gz', '.tgz', '.tar')):
-                        with tarfile.open(fp) as t: t.extractall(root)
-                except Exception:
-                    pass
-
-        snapshot_meta = {}
-        for root, _, files in os.walk(snapshot_dir):
-            for f in files:
-                if f.lower().endswith(('.csv', '.txt', '.tsv')) and not f.startswith('.'):
-                    try:
-                        with open(os.path.join(root, f), 'r', encoding='utf-8', errors='ignore') as mf:
-                            for line in mf:
-                                parts = line.strip().split('|') if '|' in line else (line.strip().split('\t') if '\t' in line else line.strip().split(',', 1))
-                                if len(parts) >= 2:
-                                    snapshot_meta[Path(parts[0].strip()).stem] = parts[-1].strip()
-                    except Exception:
-                        pass
-
-        AUDIO_EXT = {'.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac', '.wma'}
-        audio_files = [os.path.join(r, f) for r, _, fs in os.walk(snapshot_dir) for f in fs if Path(f).suffix.lower() in AUDIO_EXT]
-        def process_af(af):
-            stem = Path(af).stem
-            dst_wav = os.path.join(LOCAL_CONVERTED_WAV, f"{stem}.wav")
-            text = snapshot_meta.get(stem, stem)
-            if os.path.exists(dst_wav) and is_valid_audio(dst_wav):
-                return (stem, text, True)
-            if convert_audio_robust(af, dst_wav):
-                return (stem, text, True)
+        if not os.path.exists(data_dir):
+            return False
+        all_jsons = glob.glob(os.path.join(data_dir, "*.json"))
+        if not all_jsons:
+            return False
+        val_csv = os.path.join(raw_dataset_dir, "val.csv")
+        val_stems = set()
+        if os.path.exists(val_csv):
+            with open(val_csv, encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        val_stems.add(line.strip().split("|")[0])
+        train_lines, val_lines = [], []
+        for jp in sorted(all_jsons):
+            abs_p = os.path.abspath(jp)
+            stem = Path(jp).stem
+            if stem in val_stems or stem.startswith("val_"):
+                val_lines.append(abs_p)
             else:
-                if os.path.exists(dst_wav): os.remove(dst_wav)
-                return (stem, text, False)
+                train_lines.append(abs_p)
+        if not val_lines and train_lines:
+            val_count = max(1, int(len(train_lines) * 0.05))
+            val_lines = train_lines[:val_count]
+            train_lines = train_lines[val_count:]
+        with open(train_txt, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(train_lines) + "\n")
+        with open(val_txt, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(val_lines) + "\n")
+        return True
 
-        with ThreadPoolExecutor(max_workers=PREPROCESS_WORKERS) as executor:
-            futures = [executor.submit(process_af, af) for af in audio_files]
-            for fut in as_completed(futures):
-                res = fut.result()
-                if res:
-                    stem, txt, ok = res
-                    if ok:
-                        metadata_rows.append((stem, txt))
-                        converted += 1
-                    else:
-                        corrupted_skipped += 1
+ensure_filelists_exist(LOCAL_PREPROCESSED, LOCAL_RAW_DATASET)
+os.makedirs(os.path.dirname(LOCAL_DATA_DIR), exist_ok=True)
+if os.path.islink(LOCAL_DATA_DIR):
+    os.unlink(LOCAL_DATA_DIR)
+elif os.path.isdir(LOCAL_DATA_DIR):
+    shutil.rmtree(LOCAL_DATA_DIR)
+os.symlink(LOCAL_PREPROCESSED, LOCAL_DATA_DIR)
 
-    meta_path = os.path.join(LOCAL_METADATA_DIR, "_all_metadata.json")
-    with open(meta_path, 'w', encoding='utf-8') as f:
-        json.dump(metadata_rows, f, ensure_ascii=False)
-    hf_upload_folder(LOCAL_CONVERTED_WAV, f"{HF_RAW_PREFIX}/wav")
-    hf_upload_file(meta_path, f"{HF_RAW_PREFIX}/_all_metadata.json")
-    hf_set_marker(MARKER_DOWNLOAD_DONE)
-    hf_set_marker(MARKER_CONVERT_DONE)
-    hf_invalidate_cache()
+def get_latest_ckpt():
+    local_ckpts = sorted(glob.glob(os.path.join(LOCAL_CHECKPOINTS, "**", "*.ckpt"), recursive=True), key=os.path.getmtime)
+    if local_ckpts:
+        return local_ckpts[-1]
+    hf_ckpt_files = [f for f in hf_list_files(HF_CHECKPOINTS_PREFIX) if f.endswith(".ckpt")]
+    if not hf_ckpt_files:
+        return None
+    target_hf_file = f"{HF_CHECKPOINTS_PREFIX}/last.ckpt" if f"{HF_CHECKPOINTS_PREFIX}/last.ckpt" in hf_ckpt_files else sorted(hf_ckpt_files)[-1]
+    local_path = hf_hub_download(repo_id=HF_BACKUP_REPO, filename=target_hf_file, repo_type="model", local_dir=KAGGLE_WORKING, token=ACTIVE_HF_TOKEN)
+    dest = os.path.join(LOCAL_CHECKPOINTS, os.path.basename(target_hf_file))
+    os.makedirs(LOCAL_CHECKPOINTS, exist_ok=True)
+    if os.path.abspath(local_path) != os.path.abspath(dest):
+        shutil.copy2(local_path, dest)
+        if os.path.exists(local_path):
+            try:
+                os.remove(local_path)
+            except Exception:
+                pass
+    return dest
 
-print("Cell 3 Complete: Audio converted to 24kHz mono WAV and synced to HF.")
+latest_ckpt = get_latest_ckpt()
+
+train_cmd = [
+    sys.executable, "-m", "optispeech.train",
+    f"experiment={EXPERIMENT_NAME}",
+    f"trainer=gpu",
+    f"trainer.max_steps={MAX_STEPS}",
+    f"trainer.precision={OPTIMAL_PRECISION}",
+    f"trainer.log_every_n_steps=10",
+    f"data.batch_size={BATCH_SIZE}",
+    f"data.num_workers={PREPROCESS_WORKERS}",
+    f"data.persistent_workers=true",
+    f"callbacks.model_checkpoint.dirpath={LOCAL_CHECKPOINTS}",
+    f"callbacks.model_checkpoint.every_n_epochs=8",
+    f"callbacks.model_checkpoint.save_top_k=1",
+    f"callbacks.model_checkpoint.save_last=true",
+    f"paths.log_dir={LOCAL_LOGS}",
+]
+
+if latest_ckpt:
+    train_cmd.append(f"ckpt_path={latest_ckpt}")
+
+import threading, time as _time
+_stop_backup = threading.Event()
+def _periodic_ckpt_backup():
+    while not _stop_backup.is_set():
+        _stop_backup.wait(7200)
+        if _stop_backup.is_set():
+            break
+        ckpts_now = sorted(glob.glob(os.path.join(LOCAL_CHECKPOINTS, "**", "*.ckpt"), recursive=True), key=os.path.getmtime)
+        if ckpts_now:
+            try:
+                latest_c = ckpts_now[-1]
+                c_name = os.path.basename(latest_c)
+                hf_upload_file(latest_c, f"{HF_CHECKPOINTS_PREFIX}/{c_name}")
+                last_ckpt = os.path.join(LOCAL_CHECKPOINTS, "last.ckpt")
+                if os.path.exists(last_ckpt) and os.path.abspath(last_ckpt) != os.path.abspath(latest_c):
+                    hf_upload_file(last_ckpt, f"{HF_CHECKPOINTS_PREFIX}/last.ckpt")
+                old_hf_ckpts = [f for f in hf_list_files(HF_CHECKPOINTS_PREFIX) if f.endswith(".ckpt")]
+                keep = {f"{HF_CHECKPOINTS_PREFIX}/{c_name}", f"{HF_CHECKPOINTS_PREFIX}/last.ckpt"}
+                to_del = [f for f in old_hf_ckpts if f not in keep]
+                if to_del:
+                    hf_delete_files(to_del)
+                    hf_invalidate_cache()
+            except Exception:
+                pass
+
+_backup_thread = threading.Thread(target=_periodic_ckpt_backup, daemon=True)
+_backup_thread.start()
+
+res = subprocess.run(train_cmd, cwd=LOCAL_REPO)
+_stop_backup.set()
+_backup_thread.join(timeout=5)
+
+new_ckpts = sorted(glob.glob(os.path.join(LOCAL_CHECKPOINTS, "**", "*.ckpt"), recursive=True), key=os.path.getmtime)
+if new_ckpts:
+    latest_new = new_ckpts[-1]
+    ckpt_basename = os.path.basename(latest_new)
+    hf_upload_file(latest_new, f"{HF_CHECKPOINTS_PREFIX}/{ckpt_basename}")
+    last_ckpt = os.path.join(LOCAL_CHECKPOINTS, "last.ckpt")
+    if os.path.exists(last_ckpt) and os.path.abspath(last_ckpt) != os.path.abspath(latest_new):
+        hf_upload_file(last_ckpt, f"{HF_CHECKPOINTS_PREFIX}/last.ckpt")
+    old_hf_ckpts = [f for f in hf_list_files(HF_CHECKPOINTS_PREFIX) if f.endswith(".ckpt")]
+    keep_names = {f"{HF_CHECKPOINTS_PREFIX}/{ckpt_basename}", f"{HF_CHECKPOINTS_PREFIX}/last.ckpt"}
+    to_delete = [f for f in old_hf_ckpts if f not in keep_names]
+    if to_delete:
+        hf_delete_files(to_delete)
+
+if os.path.isdir(LOCAL_LOGS):
+    hf_upload_folder(LOCAL_LOGS, HF_LOGS_PREFIX)
+
+print("Cell 3 Complete: Training session executed and synced.")

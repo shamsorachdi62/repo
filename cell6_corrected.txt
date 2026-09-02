@@ -4,7 +4,143 @@ from pathlib import Path
 os.chdir(LOCAL_REPO)
 os.environ["PROJECT_ROOT"] = LOCAL_REPO
 
+if 'ensure_filelists_exist' not in globals():
+    def ensure_filelists_exist(preprocessed_dir, raw_dataset_dir):
+        import glob, os
+        from pathlib import Path
+        data_dir = os.path.join(preprocessed_dir, "data")
+        train_txt = os.path.join(preprocessed_dir, "train.txt")
+        val_txt = os.path.join(preprocessed_dir, "val.txt")
+        if os.path.exists(train_txt) and os.path.getsize(train_txt) > 0:
+            return True
+        if not os.path.exists(data_dir):
+            return False
+        all_jsons = glob.glob(os.path.join(data_dir, "*.json"))
+        if not all_jsons:
+            return False
+        val_csv = os.path.join(raw_dataset_dir, "val.csv")
+        val_stems = set()
+        if os.path.exists(val_csv):
+            with open(val_csv, encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        parts = line.strip().split("|")
+                        val_stems.add(parts[0])
+        train_lines, val_lines = [], []
+        for jp in sorted(all_jsons):
+            abs_p = os.path.abspath(jp)
+            stem = Path(jp).stem
+            if stem in val_stems or stem.startswith("val_"):
+                val_lines.append(abs_p)
+            else:
+                train_lines.append(abs_p)
+        if not val_lines and train_lines:
+            val_count = max(1, int(len(train_lines) * 0.05))
+            val_lines = train_lines[:val_count]
+            train_lines = train_lines[val_count:]
+        with open(train_txt, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(train_lines) + "\n")
+        print(f"Auto-generated {train_txt} ({len(train_lines)} entries)")
+        with open(val_txt, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(val_lines) + "\n")
+        print(f"Auto-generated {val_txt} ({len(val_lines)} entries)")
+        return True
+
 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "torchcrepe", "penn"], check=False)
+
+pitch_ext_file = os.path.join(LOCAL_REPO, "optispeech", "dataset", "feature_extractors", "pitch_extractors.py")
+os.makedirs(os.path.dirname(pitch_ext_file), exist_ok=True)
+with open(pitch_ext_file, "w", encoding="utf-8") as f:
+    f.write('''import dataclasses
+import typing
+import warnings
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+
+import librosa
+import numpy as np
+import torch
+import torchaudio
+import pyworld as pw
+from scipy.interpolate import interp1d
+
+try:
+    import torchcrepe
+except ImportError:
+    torchcrepe = None
+
+try:
+    import penn
+except ImportError:
+    penn = None
+
+from optispeech.utils import pylogger, trim_or_pad_to_target_length
+
+log = pylogger.get_pylogger(__name__)
+
+@dataclass
+class BasePitchExtractor(ABC):
+    sample_rate: int
+    n_feats: int
+    hop_length: int
+    n_fft: int
+    win_length: int
+    f_min: int
+    f_max: int
+    batch_size: int
+    interpolate: bool = True
+
+    def __post_init__(self):
+        pass
+
+    @abstractmethod
+    def __call__(self, wav: np.ndarray, mel_length: int) -> np.ndarray:
+        """Extract pitch."""
+
+    def __getstate__(self):
+        return dataclasses.asdict(self)
+
+    def __setstate__(self, state):
+        for (attr, value) in state.items():
+            setattr(self, attr, value)
+        self.__post_init__()
+
+    @staticmethod
+    def perform_interpolation(pitch):
+        nonzero_ids = np.where(pitch != 0)[0]
+        if len(nonzero_ids) == 0:
+            return pitch
+        interp_fn = interp1d(
+            nonzero_ids,
+            pitch[nonzero_ids],
+            fill_value=(pitch[nonzero_ids[0]], pitch[nonzero_ids[-1]]),
+            bounds_error=False,
+        )
+        pitch = interp_fn(np.arange(0, len(pitch)))
+        return pitch
+
+@dataclass
+class DIOPitchExtractor(BasePitchExtractor):
+    _METHOD: typing.ClassVar[str] = "dio"
+
+    def __post_init__(self):
+        self.extraction_func = getattr(pw, self._METHOD)
+
+    def __call__(self, wav, mel_length):
+        wav = wav.astype(np.double)
+        pitch, t = self.extraction_func(
+            wav, self.sample_rate, frame_period=self.hop_length / self.sample_rate * 1000
+        )
+        pitch = pw.stonemask(wav, pitch, t, self.sample_rate)
+        pitch = trim_or_pad_to_target_length(pitch, mel_length)
+        if self.interpolate:
+            pitch = self.perform_interpolation(pitch)
+        return pitch
+
+class HarvestPitchExtractor(DIOPitchExtractor):
+    _METHOD: str = "harvest"
+''')
+print("Auto-patched pitch_extractors.py for safe optional imports.")
 
 configs_data_dir = os.path.join(LOCAL_REPO, "configs", "data")
 template_yaml = os.path.join(configs_data_dir, "saeed.yaml")
@@ -147,6 +283,7 @@ if has_preprocessed_hf:
     else:
         print(f"Local preprocessed data found: {len(existing_npz)} files.")
 
+    ensure_filelists_exist(LOCAL_PREPROCESSED, LOCAL_RAW_DATASET)
     os.makedirs(os.path.dirname(LOCAL_DATA_DIR), exist_ok=True)
     if os.path.islink(LOCAL_DATA_DIR):
         os.unlink(LOCAL_DATA_DIR)
@@ -155,9 +292,9 @@ if has_preprocessed_hf:
     os.symlink(LOCAL_PREPROCESSED, LOCAL_DATA_DIR)
     print(f"Linked {LOCAL_DATA_DIR} -> {LOCAL_PREPROCESSED}")
 else:
-    print("Phase 4: Preprocessing audio features & MANTOQ phonemes from scratch...")
+    print(f"Phase 4: Preprocessing audio features & MANTOQ phonemes using {PREPROCESS_WORKERS} workers & batch size {PREPROCESS_BATCH_SIZE}...")
 
-    if os.path.isdir(LOCAL_PREPROCESSED):
+    if os.path.exists(LOCAL_PREPROCESSED):
         shutil.rmtree(LOCAL_PREPROCESSED)
 
     cmd = [
@@ -166,7 +303,7 @@ else:
         LOCAL_RAW_DATASET,
         LOCAL_PREPROCESSED,
         "--n-workers", str(PREPROCESS_WORKERS),
-        "--batch-size", "8",
+        "--batch-size", str(PREPROCESS_BATCH_SIZE),
     ]
     print(f"Executing: {' '.join(cmd)}")
     res = subprocess.run(cmd, cwd=LOCAL_REPO)
@@ -174,6 +311,7 @@ else:
     if res.returncode != 0:
         raise RuntimeError(f"Preprocessing failed with exit code {res.returncode}")
 
+    ensure_filelists_exist(LOCAL_PREPROCESSED, LOCAL_RAW_DATASET)
     os.makedirs(os.path.dirname(LOCAL_DATA_DIR), exist_ok=True)
     if os.path.islink(LOCAL_DATA_DIR):
         os.unlink(LOCAL_DATA_DIR)

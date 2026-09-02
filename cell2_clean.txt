@@ -1,4 +1,4 @@
-import os, glob, json, shutil, subprocess, traceback
+import os, sys, glob, json, shutil, random, re, subprocess
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import soundfile as sf
@@ -9,9 +9,7 @@ def is_valid_audio(audio_path):
         if not os.path.exists(audio_path) or os.path.getsize(audio_path) < 100:
             return False
         info = sf.info(audio_path)
-        if info.duration < 0.1 or info.frames == 0:
-            return False
-        return True
+        return info.duration >= 0.1 and info.frames > 0
     except Exception:
         return False
 
@@ -40,51 +38,14 @@ def convert_audio_robust(src_path, dst_path, target_sr=SAMPLE_RATE):
              "-ar", str(target_sr), "-ac", "1", "-sample_fmt", "s16", str(dst_path)],
             check=True, capture_output=True
         )
-        if is_valid_audio(dst_path):
-            return True
+        return is_valid_audio(dst_path)
     except Exception:
-        pass
-    return False
-
-def load_snapshot_metadata(snapshot_dir):
-    meta_dict = {}
-    csv_txt_files = []
-    for r, _, fs in os.walk(snapshot_dir):
-        for f in fs:
-            if f.lower().endswith(('.csv', '.txt', '.tsv')) and not f.startswith('.'):
-                csv_txt_files.append(os.path.join(r, f))
-    
-    for meta_file in csv_txt_files:
-        try:
-            with open(meta_file, 'r', encoding='utf-8', errors='ignore') as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    if '|' in line:
-                        parts = line.split('|')
-                    elif '\t' in line:
-                        parts = line.split('\t')
-                    elif ',' in line:
-                        parts = line.split(',', 1)
-                    else:
-                        continue
-                    if len(parts) >= 2:
-                        stem = Path(parts[0].strip()).stem
-                        text = parts[-1].strip()
-                        if stem and text:
-                            meta_dict[stem] = text
-        except Exception:
-            pass
-    return meta_dict
+        return False
 
 has_raw_hf = hf_marker_exists(MARKER_CONVERT_DONE) or len(hf_list_files(f"{HF_RAW_PREFIX}/wav")) > 0
-
 if has_raw_hf:
-    print("Phase 1-2 (Download+Convert): Already completed. Restoring from HF backup...")
     existing_wavs = glob.glob(os.path.join(LOCAL_CONVERTED_WAV, "*.wav"))
     if not existing_wavs:
-        print("Downloading converted WAVs from HF backup...")
         hf_download_folder(HF_RAW_PREFIX, KAGGLE_WORKING)
         restored = glob.glob(os.path.join(KAGGLE_WORKING, HF_RAW_PREFIX, "wav", "*.wav"))
         if restored:
@@ -99,57 +60,30 @@ if has_raw_hf:
             csv_src = os.path.join(KAGGLE_WORKING, HF_RAW_PREFIX, csv_name)
             if os.path.exists(csv_src):
                 shutil.copy2(csv_src, os.path.join(LOCAL_RAW_DATASET, csv_name))
-        wav_count = len(glob.glob(os.path.join(LOCAL_CONVERTED_WAV, "*.wav")))
-        print(f"Restored {wav_count} WAV files from HF backup.")
-    else:
-        print(f"Local WAVs found: {len(existing_wavs)}")
 else:
-    print("Phase 1: Downloading dataset...")
     _ds_loaded_via_lib = False
     try:
         from datasets import load_dataset
         load_kwargs = {"trust_remote_code": True}
         if ACTIVE_HF_TOKEN:
             load_kwargs["token"] = ACTIVE_HF_TOKEN
-        try:
-            ds = load_dataset(HF_DATASET_ID, **load_kwargs)
-            print(f"Dataset loaded: {ds}")
-            _ds_loaded_via_lib = True
-        except Exception as e_ds:
-            print(f"Datasets API failed: {e_ds}. Falling back to snapshot...")
-            from huggingface_hub import snapshot_download
-            snapshot_download(
-                repo_id=HF_DATASET_ID, repo_type="dataset",
-                local_dir=os.path.join(LOCAL_RAW_DATASET, "_hf_snapshot"),
-                token=ACTIVE_HF_TOKEN or None,
-            )
-            print("Snapshot downloaded.")
-    except Exception as e:
-        print(f"Phase 1 failed: {e}")
-        raise
+        ds = load_dataset(HF_DATASET_ID, **load_kwargs)
+        _ds_loaded_via_lib = True
+    except Exception:
+        snapshot_download(
+            repo_id=HF_DATASET_ID, repo_type="dataset",
+            local_dir=os.path.join(LOCAL_RAW_DATASET, "_hf_snapshot"),
+            token=ACTIVE_HF_TOKEN or None,
+        )
 
-    print("\nPhase 2: Converting audio to WAV & filtering corrupted files in parallel...")
-    converted = 0
-    corrupted_skipped = 0
-    metadata_rows = []
-
+    converted, corrupted_skipped, metadata_rows = 0, 0, []
     if _ds_loaded_via_lib:
         for split_name in ds:
             split = ds[split_name]
-            audio_col = next(
-                (c for c in split.column_names
-                 if c in ('audio', 'speech', 'wav', 'sound', 'recording')), None
-            )
-            text_col = next(
-                (c for c in split.column_names
-                 if c in ('text', 'sentence', 'transcription', 'transcript', 'utterance')), None
-            )
+            audio_col = next((c for c in split.column_names if c in ('audio', 'speech', 'wav', 'sound', 'recording')), None)
+            text_col = next((c for c in split.column_names if c in ('text', 'sentence', 'transcription', 'transcript', 'utterance')), None)
             if not audio_col or not text_col:
-                print(f"Missing column in {split_name}. Columns: {split.column_names}")
                 continue
-
-            print(f"Processing split '{split_name}' ({len(split)} samples)...")
-            
             def process_sample(args):
                 idx, sample = args
                 file_id = f"{split_name}_{idx:06d}"
@@ -199,8 +133,6 @@ else:
                             converted += 1
                         else:
                             corrupted_skipped += 1
-                    if converted % 500 == 0 and converted > 0:
-                        print(f"   ... {converted} valid audio files processed")
         del ds
     else:
         snapshot_dir = os.path.join(LOCAL_RAW_DATASET, "_hf_snapshot")
@@ -210,25 +142,27 @@ else:
                 fp = os.path.join(root, f)
                 try:
                     if f.endswith('.zip'):
-                        with zipfile.ZipFile(fp, 'r') as z:
-                            z.extractall(root)
+                        with zipfile.ZipFile(fp, 'r') as z: z.extractall(root)
                     elif f.endswith(('.tar.gz', '.tgz', '.tar')):
-                        with tarfile.open(fp) as t:
-                            t.extractall(root)
+                        with tarfile.open(fp) as t: t.extractall(root)
                 except Exception:
                     pass
 
-        snapshot_meta = load_snapshot_metadata(snapshot_dir)
-        print(f"Loaded {len(snapshot_meta)} transcription entries from snapshot CSV/TXT files.")
+        snapshot_meta = {}
+        for root, _, files in os.walk(snapshot_dir):
+            for f in files:
+                if f.lower().endswith(('.csv', '.txt', '.tsv')) and not f.startswith('.'):
+                    try:
+                        with open(os.path.join(root, f), 'r', encoding='utf-8', errors='ignore') as mf:
+                            for line in mf:
+                                parts = line.strip().split('|') if '|' in line else (line.strip().split('\t') if '\t' in line else line.strip().split(',', 1))
+                                if len(parts) >= 2:
+                                    snapshot_meta[Path(parts[0].strip()).stem] = parts[-1].strip()
+                    except Exception:
+                        pass
 
         AUDIO_EXT = {'.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac', '.wma'}
-        audio_files = [
-            os.path.join(r, f)
-            for r, _, fs in os.walk(snapshot_dir)
-            for f in fs if Path(f).suffix.lower() in AUDIO_EXT
-        ]
-        print(f"Found {len(audio_files)} audio files. Verifying & converting in parallel...")
-        
+        audio_files = [os.path.join(r, f) for r, _, fs in os.walk(snapshot_dir) for f in fs if Path(f).suffix.lower() in AUDIO_EXT]
         def process_af(af):
             stem = Path(af).stem
             dst_wav = os.path.join(LOCAL_CONVERTED_WAV, f"{stem}.wav")
@@ -238,8 +172,7 @@ else:
             if convert_audio_robust(af, dst_wav):
                 return (stem, text, True)
             else:
-                if os.path.exists(dst_wav):
-                    os.remove(dst_wav)
+                if os.path.exists(dst_wav): os.remove(dst_wav)
                 return (stem, text, False)
 
         with ThreadPoolExecutor(max_workers=PREPROCESS_WORKERS) as executor:
@@ -254,16 +187,99 @@ else:
                     else:
                         corrupted_skipped += 1
 
-    os.makedirs(LOCAL_METADATA_DIR, exist_ok=True)
     meta_path = os.path.join(LOCAL_METADATA_DIR, "_all_metadata.json")
     with open(meta_path, 'w', encoding='utf-8') as f:
         json.dump(metadata_rows, f, ensure_ascii=False)
-
-    print(f"\nPhase 2 complete. Valid: {converted} | Corrupted skipped: {corrupted_skipped}")
-
-    print("Uploading converted data to HF backup...")
     hf_upload_folder(LOCAL_CONVERTED_WAV, f"{HF_RAW_PREFIX}/wav")
     hf_upload_file(meta_path, f"{HF_RAW_PREFIX}/_all_metadata.json")
     hf_set_marker(MARKER_DOWNLOAD_DONE)
     hf_set_marker(MARKER_CONVERT_DONE)
-    print("Upload complete.")
+
+if not hf_marker_exists(MARKER_METADATA_DONE):
+    meta_path = os.path.join(LOCAL_METADATA_DIR, "_all_metadata.json")
+    all_rows = json.load(open(meta_path, encoding='utf-8')) if os.path.exists(meta_path) else []
+    valid_wav_stems = {Path(f).stem for f in os.listdir(LOCAL_CONVERTED_WAV) if f.endswith('.wav') and is_valid_audio(os.path.join(LOCAL_CONVERTED_WAV, f))}
+    valid_entries = [(fid, text.strip()) for fid, text in all_rows if fid in valid_wav_stems and text and text.strip()] if all_rows else [(stem, stem) for stem in sorted(valid_wav_stems)]
+    random.seed(42)
+    random.shuffle(valid_entries)
+    val_count = max(1, int(len(valid_entries) * 0.05))
+    val_entries = valid_entries[:val_count]
+    train_entries = valid_entries[val_count:]
+    for fname, entries in [("train.csv", train_entries), ("val.csv", val_entries)]:
+        fpath = os.path.join(LOCAL_RAW_DATASET, fname)
+        with open(fpath, 'w', encoding='utf-8', newline='\n') as f:
+            for fid, text in entries:
+                f.write(f"{fid}|{text.replace('|', ' ')}\n")
+        hf_upload_file(fpath, f"{HF_RAW_PREFIX}/{fname}")
+    hf_set_marker(MARKER_METADATA_DONE)
+
+has_preprocessed_hf = hf_marker_exists(MARKER_PREPROCESS_DONE) or len(hf_list_files(HF_PREPROCESSED_PREFIX)) > 0
+if has_preprocessed_hf:
+    existing_npz = glob.glob(os.path.join(LOCAL_PREPROCESSED, "data", "*.npz"))
+    if not existing_npz:
+        hf_download_folder(HF_PREPROCESSED_PREFIX, KAGGLE_WORKING)
+        src_dir = os.path.join(KAGGLE_WORKING, HF_PREPROCESSED_PREFIX)
+        if os.path.isdir(src_dir) and not os.path.isdir(LOCAL_PREPROCESSED):
+            shutil.copytree(src_dir, LOCAL_PREPROCESSED)
+    ensure_filelists_exist(LOCAL_PREPROCESSED, LOCAL_RAW_DATASET)
+else:
+    if os.path.exists(LOCAL_PREPROCESSED):
+        shutil.rmtree(LOCAL_PREPROCESSED)
+    cmd = [
+        sys.executable, "-m", "optispeech.tools.preprocess_dataset",
+        EXPERIMENT_NAME, LOCAL_RAW_DATASET, LOCAL_PREPROCESSED,
+        "--n-workers", str(PREPROCESS_WORKERS), "--batch-size", str(PREPROCESS_BATCH_SIZE),
+    ]
+    res = subprocess.run(cmd, cwd=LOCAL_REPO)
+    if res.returncode != 0:
+        raise RuntimeError(f"Preprocessing failed: {res.returncode}")
+    ensure_filelists_exist(LOCAL_PREPROCESSED, LOCAL_RAW_DATASET)
+    hf_upload_folder(LOCAL_PREPROCESSED, HF_PREPROCESSED_PREFIX)
+    hf_set_marker(MARKER_PREPROCESS_DONE)
+
+os.makedirs(os.path.dirname(LOCAL_DATA_DIR), exist_ok=True)
+if os.path.islink(LOCAL_DATA_DIR):
+    os.unlink(LOCAL_DATA_DIR)
+elif os.path.isdir(LOCAL_DATA_DIR):
+    shutil.rmtree(LOCAL_DATA_DIR)
+os.symlink(LOCAL_PREPROCESSED, LOCAL_DATA_DIR)
+
+if hf_marker_exists(MARKER_STATS_DONE):
+    stats_json = os.path.join(LOCAL_DATA_STATS, "stats.json")
+    if not os.path.exists(stats_json):
+        hf_download_folder(HF_STATS_PREFIX, KAGGLE_WORKING)
+        src = os.path.join(KAGGLE_WORKING, HF_STATS_PREFIX, "stats.json")
+        if os.path.exists(src):
+            os.makedirs(LOCAL_DATA_STATS, exist_ok=True)
+            shutil.copy2(src, stats_json)
+    if os.path.exists(stats_json):
+        stats = json.load(open(stats_json))
+        cfg_path = os.path.join(LOCAL_REPO, "configs", "data", f"{EXPERIMENT_NAME}.yaml")
+        if os.path.exists(cfg_path):
+            text = open(cfg_path).read()
+            for k, v in stats.items():
+                text = re.sub(rf'({k}:\s*)([\d.\-]+)', rf'\g<1>{v}', text)
+            with open(cfg_path, 'w') as f:
+                f.write(text)
+else:
+    cmd = [
+        sys.executable, "-m", "optispeech.tools.generate_data_statistics",
+        EXPERIMENT_NAME, "-b", "64", "-w", str(PREPROCESS_WORKERS), "-o", LOCAL_DATA_STATS,
+    ]
+    res = subprocess.run(cmd, cwd=LOCAL_REPO)
+    if res.returncode != 0:
+        raise RuntimeError("Failed to calculate statistics")
+    stats_json = os.path.join(LOCAL_DATA_STATS, "stats.json")
+    if os.path.exists(stats_json):
+        stats = json.load(open(stats_json))
+        cfg_path = os.path.join(LOCAL_REPO, "configs", "data", f"{EXPERIMENT_NAME}.yaml")
+        if os.path.exists(cfg_path):
+            text = open(cfg_path).read()
+            for k, v in stats.items():
+                text = re.sub(rf'({k}:\s*)([\d.\-]+)', rf'\g<1>{v}', text)
+            with open(cfg_path, 'w') as f:
+                f.write(text)
+    hf_upload_folder(LOCAL_DATA_STATS, HF_STATS_PREFIX)
+    hf_set_marker(MARKER_STATS_DONE)
+
+print("Cell 2 Complete: Dataset preprocessed, features extracted, and stats injected.")

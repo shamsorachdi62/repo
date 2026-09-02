@@ -1,4 +1,4 @@
-import os
+import os, multiprocessing
 
 HF_DATASET_ID = "Mohamad-I8/AseelArabicDataset"
 HF_BACKUP_REPO = "Mohamad-I8/tts-training-backup"
@@ -9,7 +9,8 @@ EXPERIMENT_NAME = "saeed"
 BATCH_SIZE = 16
 MAX_STEPS = 300000
 SAMPLE_RATE = 24000
-PREPROCESS_WORKERS = 2
+PREPROCESS_WORKERS = max(2, os.cpu_count() or 4)
+PREPROCESS_BATCH_SIZE = 32
 
 KAGGLE_WORKING = "/kaggle/working"
 LOCAL_REPO = os.path.join(KAGGLE_WORKING, "repo")
@@ -37,4 +38,4 @@ MARKER_METADATA_DONE = "03_metadata_done"
 MARKER_PREPROCESS_DONE = "04_preprocess_done"
 MARKER_STATS_DONE = "05_stats_done"
 
-print("Configuration loaded.")
+print(f"Configuration loaded. Max CPU Workers: {PREPROCESS_WORKERS}")

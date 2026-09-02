@@ -1,0 +1,32 @@
+QUANTIZE_INT8 = True
+TEST_TEXT = "\u0645\u0631\u062d\u0628\u0627\u060c \u0647\u0630\u0627 \u0627\u062e\u062a\u0628\u0627\u0631 \u0644\u0646\u0645\u0648\u0630\u062c \u0627\u0644\u062a\u062d\u0648\u064a\u0644 \u0627\u0644\u0635\u0648\u062a\u064a."
+
+import os, sys, glob, subprocess, shutil
+os.chdir(LOCAL_REPO)
+os.environ["PROJECT_ROOT"] = LOCAL_REPO
+
+ckpts = sorted(glob.glob(os.path.join(LOCAL_CHECKPOINTS, "**", "*.ckpt"), recursive=True), key=os.path.getmtime)
+if not ckpts:
+    hf_ckpt_files = [f for f in hf_list_files(HF_CHECKPOINTS_PREFIX) if f.endswith(".ckpt")]
+    if hf_ckpt_files:
+        for ckpt_file in hf_ckpt_files:
+            local_path = hf_hub_download(repo_id=HF_BACKUP_REPO, filename=ckpt_file, repo_type="model", local_dir=KAGGLE_WORKING, token=ACTIVE_HF_TOKEN)
+            dest = os.path.join(LOCAL_CHECKPOINTS, os.path.basename(ckpt_file))
+            os.makedirs(LOCAL_CHECKPOINTS, exist_ok=True)
+            if os.path.abspath(local_path) != os.path.abspath(dest):
+                shutil.copy2(local_path, dest)
+        ckpts = sorted(glob.glob(os.path.join(LOCAL_CHECKPOINTS, "**", "*.ckpt"), recursive=True), key=os.path.getmtime)
+
+if ckpts:
+    checkpoint_path = ckpts[-1]
+    export_cmd = [sys.executable, "-m", "optispeech.onnx.nano_streaming", "--checkpoint", checkpoint_path, "--output-dir", LOCAL_ONNX_EXPORT, "--text", TEST_TEXT]
+    if QUANTIZE_INT8:
+        export_cmd.append("--quantize-encoder-decoder")
+    res = subprocess.run(export_cmd, cwd=LOCAL_REPO)
+    if res.returncode == 0:
+        old_onnx = hf_list_files(HF_ONNX_PREFIX)
+        if old_onnx:
+            hf_delete_files(old_onnx)
+        hf_upload_folder(LOCAL_ONNX_EXPORT, HF_ONNX_PREFIX)
+
+print("Cell 4 Complete: Export finished.")

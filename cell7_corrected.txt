@@ -1,0 +1,148 @@
+import os, sys, subprocess, json, re, shutil, glob
+from pathlib import Path
+
+os.chdir(LOCAL_REPO)
+os.environ["PROJECT_ROOT"] = LOCAL_REPO
+
+if 'ensure_filelists_exist' not in globals():
+    def ensure_filelists_exist(preprocessed_dir, raw_dataset_dir):
+        import glob, os
+        from pathlib import Path
+        data_dir = os.path.join(preprocessed_dir, "data")
+        train_txt = os.path.join(preprocessed_dir, "train.txt")
+        val_txt = os.path.join(preprocessed_dir, "val.txt")
+        if os.path.exists(train_txt) and os.path.getsize(train_txt) > 0:
+            return True
+        if not os.path.exists(data_dir):
+            return False
+        all_jsons = glob.glob(os.path.join(data_dir, "*.json"))
+        if not all_jsons:
+            return False
+        val_csv = os.path.join(raw_dataset_dir, "val.csv")
+        val_stems = set()
+        if os.path.exists(val_csv):
+            with open(val_csv, encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        parts = line.strip().split("|")
+                        val_stems.add(parts[0])
+        train_lines, val_lines = [], []
+        for jp in sorted(all_jsons):
+            abs_p = os.path.abspath(jp)
+            stem = Path(jp).stem
+            if stem in val_stems or stem.startswith("val_"):
+                val_lines.append(abs_p)
+            else:
+                train_lines.append(abs_p)
+        if not val_lines and train_lines:
+            val_count = max(1, int(len(train_lines) * 0.05))
+            val_lines = train_lines[:val_count]
+            train_lines = train_lines[val_count:]
+        with open(train_txt, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(train_lines) + "\n")
+        print(f"Auto-generated {train_txt} ({len(train_lines)} entries)")
+        with open(val_txt, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(val_lines) + "\n")
+        print(f"Auto-generated {val_txt} ({len(val_lines)} entries)")
+        return True
+
+configs_data_dir = os.path.join(LOCAL_REPO, "configs", "data")
+template_yaml = os.path.join(configs_data_dir, "saeed.yaml")
+for name in [EXPERIMENT_NAME, EXPERIMENT_NAME.lower(), EXPERIMENT_NAME.upper()]:
+    target_yaml = os.path.join(configs_data_dir, f"{name}.yaml")
+    if not os.path.exists(target_yaml) and os.path.exists(template_yaml):
+        content = open(template_yaml, encoding="utf-8").read()
+        content = content.replace("name: saeed", f"name: {name}")
+        with open(target_yaml, "w", encoding="utf-8") as f:
+            f.write(content)
+        print(f"Auto-created dataset config: {target_yaml}")
+
+if not ensure_filelists_exist(LOCAL_PREPROCESSED, LOCAL_RAW_DATASET):
+    has_preprocessed_hf = hf_marker_exists(MARKER_PREPROCESS_DONE) or len(hf_list_files(HF_PREPROCESSED_PREFIX)) > 0
+    if has_preprocessed_hf:
+        print("Preprocessed features found on HF backup. Downloading...")
+        hf_download_folder(HF_PREPROCESSED_PREFIX, KAGGLE_WORKING)
+        src_dir = os.path.join(KAGGLE_WORKING, HF_PREPROCESSED_PREFIX)
+        if os.path.isdir(src_dir) and not os.path.isdir(LOCAL_PREPROCESSED):
+            shutil.copytree(src_dir, LOCAL_PREPROCESSED)
+        ensure_filelists_exist(LOCAL_PREPROCESSED, LOCAL_RAW_DATASET)
+    else:
+        print("Preprocessed data/filelists missing. Auto-running Phase 4 (Preprocessing)...")
+        if os.path.exists(LOCAL_PREPROCESSED):
+            shutil.rmtree(LOCAL_PREPROCESSED)
+        cmd_prep = [
+            sys.executable, "-m", "optispeech.tools.preprocess_dataset",
+            EXPERIMENT_NAME, LOCAL_RAW_DATASET, LOCAL_PREPROCESSED,
+            "--n-workers", str(PREPROCESS_WORKERS), "--batch-size", "8",
+        ]
+        print(f"Executing: {' '.join(cmd_prep)}")
+        res_prep = subprocess.run(cmd_prep, cwd=LOCAL_REPO)
+        if res_prep.returncode != 0:
+            raise RuntimeError(f"Preprocessing failed with exit code {res_prep.returncode}")
+        ensure_filelists_exist(LOCAL_PREPROCESSED, LOCAL_RAW_DATASET)
+        print("Uploading preprocessed data to HF backup...")
+        hf_upload_folder(LOCAL_PREPROCESSED, HF_PREPROCESSED_PREFIX)
+        hf_set_marker(MARKER_PREPROCESS_DONE)
+
+os.makedirs(os.path.dirname(LOCAL_DATA_DIR), exist_ok=True)
+if os.path.islink(LOCAL_DATA_DIR):
+    os.unlink(LOCAL_DATA_DIR)
+elif os.path.isdir(LOCAL_DATA_DIR):
+    shutil.rmtree(LOCAL_DATA_DIR)
+os.symlink(LOCAL_PREPROCESSED, LOCAL_DATA_DIR)
+
+if hf_marker_exists(MARKER_STATS_DONE):
+    print("Phase 5 (Stats): Already completed.")
+    stats_json = os.path.join(LOCAL_DATA_STATS, "stats.json")
+    if not os.path.exists(stats_json):
+        print("Downloading stats from HF backup...")
+        hf_download_folder(HF_STATS_PREFIX, KAGGLE_WORKING)
+        src = os.path.join(KAGGLE_WORKING, HF_STATS_PREFIX, "stats.json")
+        if os.path.exists(src):
+            os.makedirs(LOCAL_DATA_STATS, exist_ok=True)
+            shutil.copy2(src, stats_json)
+            print("Stats restored from HF.")
+
+    if os.path.exists(stats_json):
+        stats = json.load(open(stats_json))
+        cfg_path = os.path.join(LOCAL_REPO, "configs", "data", f"{EXPERIMENT_NAME}.yaml")
+        if os.path.exists(cfg_path):
+            text = open(cfg_path).read()
+            for k, v in stats.items():
+                text = re.sub(rf'({k}:\s*)([\d.\-]+)', rf'\g<1>{v}', text)
+            with open(cfg_path, 'w') as f:
+                f.write(text)
+            print(f"Injected stats into {cfg_path}")
+else:
+    print("Phase 5: Calculating normalization statistics...")
+    cmd = [
+        sys.executable, "-m", "optispeech.tools.generate_data_statistics",
+        EXPERIMENT_NAME,
+        "-b", "32",
+        "-w", "2",
+        "-o", LOCAL_DATA_STATS,
+    ]
+    res = subprocess.run(cmd, cwd=LOCAL_REPO)
+    if res.returncode != 0:
+        raise RuntimeError("Failed to calculate statistics")
+
+    stats_json = os.path.json(LOCAL_DATA_STATS, "stats.json")
+    if os.path.exists(stats_json):
+        stats = json.load(open(stats_json))
+        print("Calculated stats:")
+        for k, v in stats.items():
+            print(f"  {k}: {v}")
+
+        cfg_path = os.path.join(LOCAL_REPO, "configs", "data", f"{EXPERIMENT_NAME}.yaml")
+        if os.path.exists(cfg_path):
+            text = open(cfg_path).read()
+            for k, v in stats.items():
+                text = re.sub(rf'({k}:\s*)([\d.\-]+)', rf'\g<1>{v}', text)
+            with open(cfg_path, 'w') as f:
+                f.write(text)
+            print(f"Updated data config: {cfg_path}")
+
+    print("Uploading stats to HF backup...")
+    hf_upload_folder(LOCAL_DATA_STATS, HF_STATS_PREFIX)
+    hf_set_marker(MARKER_STATS_DONE)
+    print("Phase 5 complete.")

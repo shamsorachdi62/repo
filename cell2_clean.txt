@@ -1,285 +1,244 @@
-import os, sys, glob, json, shutil, random, re, subprocess
-from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import soundfile as sf
+if os.path.isdir(LOCAL_REPO):
+    subprocess.run(["git", "pull"], cwd=LOCAL_REPO, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+else:
+    subprocess.run(["git", "clone", GITHUB_REPO_URL, LOCAL_REPO], check=True)
+
+pitch_ext_file = os.path.join(LOCAL_REPO, "optispeech", "dataset", "feature_extractors", "pitch_extractors.py")
+os.makedirs(os.path.dirname(pitch_ext_file), exist_ok=True)
+with open(pitch_ext_file, "w", encoding="utf-8") as f:
+    f.write('''import dataclasses
+import typing
+import warnings
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+
+import librosa
 import numpy as np
+import torch
+import torchaudio
+import pyworld as pw
+from scipy.interpolate import interp1d
 
-def is_valid_audio(audio_path):
-    try:
-        if not os.path.exists(audio_path) or os.path.getsize(audio_path) < 100:
-            return False
-        info = sf.info(audio_path)
-        return info.duration >= 0.1 and info.frames > 0
-    except Exception:
-        return False
+try:
+    import torchcrepe
+except ImportError:
+    torchcrepe = None
 
-def convert_audio_robust(src_path, dst_path, target_sr=SAMPLE_RATE):
-    try:
-        import librosa
-        wav, _ = librosa.load(src_path, sr=target_sr, mono=True)
-        if len(wav) > 0 and np.isfinite(wav).all():
-            sf.write(dst_path, wav, target_sr, subtype='PCM_16')
-            if is_valid_audio(dst_path):
-                return True
-    except Exception:
+try:
+    import penn
+except ImportError:
+    penn = None
+
+from optispeech.utils import pylogger, trim_or_pad_to_target_length
+
+log = pylogger.get_pylogger(__name__)
+
+@dataclass
+class BasePitchExtractor(ABC):
+    sample_rate: int
+    n_feats: int
+    hop_length: int
+    n_fft: int
+    win_length: int
+    f_min: int
+    f_max: int
+    batch_size: int
+    interpolate: bool = True
+
+    def __post_init__(self):
         pass
-    try:
-        from pydub import AudioSegment
-        audio = AudioSegment.from_file(src_path)
-        audio = audio.set_frame_rate(target_sr).set_channels(1).set_sample_width(2)
-        audio.export(dst_path, format="wav")
-        if is_valid_audio(dst_path):
-            return True
-    except Exception:
-        pass
-    try:
-        subprocess.run(
-            ["ffmpeg", "-y", "-v", "error", "-i", str(src_path),
-             "-ar", str(target_sr), "-ac", "1", "-sample_fmt", "s16", str(dst_path)],
-            check=True, capture_output=True
+
+    @abstractmethod
+    def __call__(self, wav: np.ndarray, mel_length: int) -> np.ndarray:
+        """Extract pitch."""
+
+    def __getstate__(self):
+        return dataclasses.asdict(self)
+
+    def __setstate__(self, state):
+        for (attr, value) in state.items():
+            setattr(self, attr, value)
+        self.__post_init__()
+
+    @staticmethod
+    def perform_interpolation(pitch):
+        nonzero_ids = np.where(pitch != 0)[0]
+        if len(nonzero_ids) == 0:
+            return pitch
+        interp_fn = interp1d(
+            nonzero_ids,
+            pitch[nonzero_ids],
+            fill_value=(pitch[nonzero_ids[0]], pitch[nonzero_ids[-1]]),
+            bounds_error=False,
         )
-        return is_valid_audio(dst_path)
-    except Exception:
-        return False
+        pitch = interp_fn(np.arange(0, len(pitch)))
+        return pitch
 
-has_raw_hf = hf_marker_exists(MARKER_CONVERT_DONE) or len(hf_list_files(f"{HF_RAW_PREFIX}/wav")) > 0
-if has_raw_hf:
-    existing_wavs = glob.glob(os.path.join(LOCAL_CONVERTED_WAV, "*.wav"))
-    if not existing_wavs:
-        hf_download_folder(HF_RAW_PREFIX, KAGGLE_WORKING)
-        restored = glob.glob(os.path.join(KAGGLE_WORKING, HF_RAW_PREFIX, "wav", "*.wav"))
-        if restored:
-            os.makedirs(LOCAL_CONVERTED_WAV, exist_ok=True)
-            for f in restored:
-                shutil.copy2(f, LOCAL_CONVERTED_WAV)
-        meta_src = os.path.join(KAGGLE_WORKING, HF_RAW_PREFIX, "_all_metadata.json")
-        if os.path.exists(meta_src):
-            os.makedirs(LOCAL_METADATA_DIR, exist_ok=True)
-            shutil.copy2(meta_src, os.path.join(LOCAL_METADATA_DIR, "_all_metadata.json"))
-        for csv_name in ["train.csv", "val.csv"]:
-            csv_src = os.path.join(KAGGLE_WORKING, HF_RAW_PREFIX, csv_name)
-            if os.path.exists(csv_src):
-                shutil.copy2(csv_src, os.path.join(LOCAL_RAW_DATASET, csv_name))
-else:
-    _ds_loaded_via_lib = False
+@dataclass
+class DIOPitchExtractor(BasePitchExtractor):
+    _METHOD: typing.ClassVar[str] = "dio"
+
+    def __post_init__(self):
+        self.extraction_func = getattr(pw, self._METHOD)
+
+    def __call__(self, wav, mel_length):
+        wav = wav.astype(np.double)
+        pitch, t = self.extraction_func(
+            wav, self.sample_rate, frame_period=self.hop_length / self.sample_rate * 1000
+        )
+        pitch = pw.stonemask(wav, pitch, t, self.sample_rate)
+        pitch = trim_or_pad_to_target_length(pitch, mel_length)
+        if self.interpolate:
+            pitch = self.perform_interpolation(pitch)
+        return pitch
+
+class HarvestPitchExtractor(DIOPitchExtractor):
+    _METHOD: str = "harvest"
+''')
+
+mantoq_lib_dir = os.path.join(LOCAL_REPO, "optispeech", "text", "mantoq", "lib")
+symbols_file = os.path.join(mantoq_lib_dir, "buck", "symbols.py")
+if not os.path.exists(symbols_file):
     try:
-        from datasets import load_dataset
-        load_kwargs = {"trust_remote_code": True}
-        if ACTIVE_HF_TOKEN:
-            load_kwargs["token"] = ACTIVE_HF_TOKEN
-        ds = load_dataset(HF_DATASET_ID, **load_kwargs)
-        _ds_loaded_via_lib = True
-    except Exception:
+        dl_dir = os.path.join(KAGGLE_WORKING, "_mantoq_tmp")
         snapshot_download(
-            repo_id=HF_DATASET_ID, repo_type="dataset",
-            local_dir=os.path.join(LOCAL_RAW_DATASET, "_hf_snapshot"),
-            token=ACTIVE_HF_TOKEN or None,
+            repo_id=HF_BACKUP_REPO, repo_type="model",
+            local_dir=dl_dir, allow_patterns="mantoq_lib/**",
+            token=ACTIVE_HF_TOKEN,
         )
-
-    converted, corrupted_skipped, metadata_rows = 0, 0, []
-    if _ds_loaded_via_lib:
-        for split_name in ds:
-            split = ds[split_name]
-            audio_col = next((c for c in split.column_names if c in ('audio', 'speech', 'wav', 'sound', 'recording')), None)
-            text_col = next((c for c in split.column_names if c in ('text', 'sentence', 'transcription', 'transcript', 'utterance')), None)
-            if not audio_col or not text_col:
-                continue
-            def process_sample(args):
-                idx, sample = args
-                file_id = f"{split_name}_{idx:06d}"
-                wav_path = os.path.join(LOCAL_CONVERTED_WAV, f"{file_id}.wav")
-                text = str(sample[text_col] or "").strip()
-                if not text:
-                    return None
-                if os.path.exists(wav_path) and is_valid_audio(wav_path):
-                    return (file_id, text, True)
-                audio_data = sample[audio_col]
-                success = False
-                if isinstance(audio_data, dict) and 'array' in audio_data:
-                    try:
-                        arr = np.array(audio_data['array'], dtype=np.float32)
-                        sr = audio_data['sampling_rate']
-                        if sr != SAMPLE_RATE:
-                            import librosa
-                            arr = librosa.resample(arr, orig_sr=sr, target_sr=SAMPLE_RATE)
-                        sf.write(wav_path, arr, SAMPLE_RATE, subtype='PCM_16')
-                        success = is_valid_audio(wav_path)
-                    except Exception:
-                        success = False
-                elif isinstance(audio_data, str) and os.path.isfile(audio_data):
-                    success = convert_audio_robust(audio_data, wav_path)
-                elif isinstance(audio_data, bytes):
-                    tmp_p = f"/tmp/_tmp_{idx}.bin"
-                    with open(tmp_p, 'wb') as f:
-                        f.write(audio_data)
-                    success = convert_audio_robust(tmp_p, wav_path)
-                    if os.path.exists(tmp_p):
-                        os.remove(tmp_p)
-                if success:
-                    return (file_id, text, True)
-                else:
-                    if os.path.exists(wav_path):
-                        os.remove(wav_path)
-                    return (file_id, text, False)
-
-            with ThreadPoolExecutor(max_workers=PREPROCESS_WORKERS) as executor:
-                futures = [executor.submit(process_sample, (idx, sample)) for idx, sample in enumerate(split)]
-                for fut in as_completed(futures):
-                    res = fut.result()
-                    if res:
-                        fid, txt, ok = res
-                        if ok:
-                            metadata_rows.append((fid, txt))
-                            converted += 1
-                        else:
-                            corrupted_skipped += 1
-        del ds
-    else:
-        snapshot_dir = os.path.join(LOCAL_RAW_DATASET, "_hf_snapshot")
-        import zipfile, tarfile
-        for root, _, files in os.walk(snapshot_dir):
-            for f in files:
-                fp = os.path.join(root, f)
-                try:
-                    if f.endswith('.zip'):
-                        with zipfile.ZipFile(fp, 'r') as z: z.extractall(root)
-                    elif f.endswith(('.tar.gz', '.tgz', '.tar')):
-                        with tarfile.open(fp) as t: t.extractall(root)
-                except Exception:
-                    pass
-
-        snapshot_meta = {}
-        for root, _, files in os.walk(snapshot_dir):
-            for f in files:
-                if f.lower().endswith(('.csv', '.txt', '.tsv')) and not f.startswith('.'):
-                    try:
-                        with open(os.path.join(root, f), 'r', encoding='utf-8', errors='ignore') as mf:
-                            for line in mf:
-                                parts = line.strip().split('|') if '|' in line else (line.strip().split('\t') if '\t' in line else line.strip().split(',', 1))
-                                if len(parts) >= 2:
-                                    snapshot_meta[Path(parts[0].strip()).stem] = parts[-1].strip()
-                    except Exception:
-                        pass
-
-        AUDIO_EXT = {'.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac', '.wma'}
-        audio_files = [os.path.join(r, f) for r, _, fs in os.walk(snapshot_dir) for f in fs if Path(f).suffix.lower() in AUDIO_EXT]
-        def process_af(af):
-            stem = Path(af).stem
-            dst_wav = os.path.join(LOCAL_CONVERTED_WAV, f"{stem}.wav")
-            text = snapshot_meta.get(stem, stem)
-            if os.path.exists(dst_wav) and is_valid_audio(dst_wav):
-                return (stem, text, True)
-            if convert_audio_robust(af, dst_wav):
-                return (stem, text, True)
-            else:
-                if os.path.exists(dst_wav): os.remove(dst_wav)
-                return (stem, text, False)
-
-        with ThreadPoolExecutor(max_workers=PREPROCESS_WORKERS) as executor:
-            futures = [executor.submit(process_af, af) for af in audio_files]
-            for fut in as_completed(futures):
-                res = fut.result()
-                if res:
-                    stem, txt, ok = res
-                    if ok:
-                        metadata_rows.append((stem, txt))
-                        converted += 1
-                    else:
-                        corrupted_skipped += 1
-
-    meta_path = os.path.join(LOCAL_METADATA_DIR, "_all_metadata.json")
-    with open(meta_path, 'w', encoding='utf-8') as f:
-        json.dump(metadata_rows, f, ensure_ascii=False)
-    hf_upload_folder(LOCAL_CONVERTED_WAV, f"{HF_RAW_PREFIX}/wav")
-    hf_upload_file(meta_path, f"{HF_RAW_PREFIX}/_all_metadata.json")
-    hf_set_marker(MARKER_DOWNLOAD_DONE)
-    hf_set_marker(MARKER_CONVERT_DONE)
-
-if not hf_marker_exists(MARKER_METADATA_DONE):
-    meta_path = os.path.join(LOCAL_METADATA_DIR, "_all_metadata.json")
-    all_rows = json.load(open(meta_path, encoding='utf-8')) if os.path.exists(meta_path) else []
-    valid_wav_stems = {Path(f).stem for f in os.listdir(LOCAL_CONVERTED_WAV) if f.endswith('.wav') and is_valid_audio(os.path.join(LOCAL_CONVERTED_WAV, f))}
-    valid_entries = [(fid, text.strip()) for fid, text in all_rows if fid in valid_wav_stems and text and text.strip()] if all_rows else [(stem, stem) for stem in sorted(valid_wav_stems)]
-    random.seed(42)
-    random.shuffle(valid_entries)
-    val_count = max(1, int(len(valid_entries) * 0.05))
-    val_entries = valid_entries[:val_count]
-    train_entries = valid_entries[val_count:]
-    for fname, entries in [("train.csv", train_entries), ("val.csv", val_entries)]:
-        fpath = os.path.join(LOCAL_RAW_DATASET, fname)
-        with open(fpath, 'w', encoding='utf-8', newline='\n') as f:
-            for fid, text in entries:
-                f.write(f"{fid}|{text.replace('|', ' ')}\n")
-        hf_upload_file(fpath, f"{HF_RAW_PREFIX}/{fname}")
-    hf_set_marker(MARKER_METADATA_DONE)
-
-has_preprocessed_hf = hf_marker_exists(MARKER_PREPROCESS_DONE) or len(hf_list_files(HF_PREPROCESSED_PREFIX)) > 0
-if has_preprocessed_hf:
-    existing_npz = glob.glob(os.path.join(LOCAL_PREPROCESSED, "data", "*.npz"))
-    if not existing_npz:
-        hf_download_folder(HF_PREPROCESSED_PREFIX, KAGGLE_WORKING)
-        src_dir = os.path.join(KAGGLE_WORKING, HF_PREPROCESSED_PREFIX)
-        if os.path.isdir(src_dir) and not os.path.isdir(LOCAL_PREPROCESSED):
-            shutil.copytree(src_dir, LOCAL_PREPROCESSED)
-    ensure_filelists_exist(LOCAL_PREPROCESSED, LOCAL_RAW_DATASET)
-else:
-    if os.path.exists(LOCAL_PREPROCESSED):
-        shutil.rmtree(LOCAL_PREPROCESSED)
-    cmd = [
-        sys.executable, "-m", "optispeech.tools.preprocess_dataset",
-        EXPERIMENT_NAME, LOCAL_RAW_DATASET, LOCAL_PREPROCESSED,
-        "--n-workers", str(PREPROCESS_WORKERS), "--batch-size", str(PREPROCESS_BATCH_SIZE),
-    ]
-    res = subprocess.run(cmd, cwd=LOCAL_REPO)
-    if res.returncode != 0:
-        raise RuntimeError(f"Preprocessing failed: {res.returncode}")
-    ensure_filelists_exist(LOCAL_PREPROCESSED, LOCAL_RAW_DATASET)
-    hf_upload_folder(LOCAL_PREPROCESSED, HF_PREPROCESSED_PREFIX)
-    hf_set_marker(MARKER_PREPROCESS_DONE)
-
-os.makedirs(os.path.dirname(LOCAL_DATA_DIR), exist_ok=True)
-if os.path.islink(LOCAL_DATA_DIR):
-    os.unlink(LOCAL_DATA_DIR)
-elif os.path.isdir(LOCAL_DATA_DIR):
-    shutil.rmtree(LOCAL_DATA_DIR)
-os.symlink(LOCAL_PREPROCESSED, LOCAL_DATA_DIR)
-
-if hf_marker_exists(MARKER_STATS_DONE):
-    stats_json = os.path.join(LOCAL_DATA_STATS, "stats.json")
-    if not os.path.exists(stats_json):
-        hf_download_folder(HF_STATS_PREFIX, KAGGLE_WORKING)
-        src = os.path.join(KAGGLE_WORKING, HF_STATS_PREFIX, "stats.json")
+        src = os.path.join(dl_dir, "mantoq_lib")
         if os.path.exists(src):
-            os.makedirs(LOCAL_DATA_STATS, exist_ok=True)
-            shutil.copy2(src, stats_json)
-    if os.path.exists(stats_json):
-        stats = json.load(open(stats_json))
-        cfg_path = os.path.join(LOCAL_REPO, "configs", "data", f"{EXPERIMENT_NAME}.yaml")
-        if os.path.exists(cfg_path):
-            text = open(cfg_path).read()
-            for k, v in stats.items():
-                text = re.sub(rf'({k}:\s*)([\d.\-]+)', rf'\g<1>{v}', text)
-            with open(cfg_path, 'w') as f:
-                f.write(text)
-else:
-    cmd = [
-        sys.executable, "-m", "optispeech.tools.generate_data_statistics",
-        EXPERIMENT_NAME, "-b", "64", "-w", str(PREPROCESS_WORKERS), "-o", LOCAL_DATA_STATS,
-    ]
-    res = subprocess.run(cmd, cwd=LOCAL_REPO)
-    if res.returncode != 0:
-        raise RuntimeError("Failed to calculate statistics")
-    stats_json = os.path.join(LOCAL_DATA_STATS, "stats.json")
-    if os.path.exists(stats_json):
-        stats = json.load(open(stats_json))
-        cfg_path = os.path.join(LOCAL_REPO, "configs", "data", f"{EXPERIMENT_NAME}.yaml")
-        if os.path.exists(cfg_path):
-            text = open(cfg_path).read()
-            for k, v in stats.items():
-                text = re.sub(rf'({k}:\s*)([\d.\-]+)', rf'\g<1>{v}', text)
-            with open(cfg_path, 'w') as f:
-                f.write(text)
-    hf_upload_folder(LOCAL_DATA_STATS, HF_STATS_PREFIX)
-    hf_set_marker(MARKER_STATS_DONE)
+            if os.path.exists(mantoq_lib_dir):
+                shutil.rmtree(mantoq_lib_dir)
+            shutil.copytree(src, mantoq_lib_dir)
+    except Exception:
+        pass
 
-print("Cell 2 Complete: Dataset preprocessed, features extracted, and stats injected.")
+configs_data_dir = os.path.join(LOCAL_REPO, "configs", "data")
+template_yaml = os.path.join(configs_data_dir, "saeed.yaml")
+for name in [EXPERIMENT_NAME, EXPERIMENT_NAME.lower(), EXPERIMENT_NAME.upper()]:
+    target_yaml = os.path.join(configs_data_dir, f"{name}.yaml")
+    if not os.path.exists(target_yaml) and os.path.exists(template_yaml):
+        content = open(template_yaml, encoding="utf-8").read()
+        content = content.replace("name: saeed", f"name: {name}")
+        content = content.replace("data/saeed/", f"data/{name}/")
+        with open(target_yaml, "w", encoding="utf-8") as f:
+            f.write(content)
+
+exp_configs_dir = os.path.join(LOCAL_REPO, "configs", "experiment")
+exp_template = os.path.join(exp_configs_dir, "saeed.yaml")
+for name in [EXPERIMENT_NAME, EXPERIMENT_NAME.lower(), EXPERIMENT_NAME.upper()]:
+    exp_target = os.path.join(exp_configs_dir, f"{name}.yaml")
+    if not os.path.exists(exp_target) and os.path.exists(exp_template):
+        content = open(exp_template, encoding="utf-8").read()
+        content = content.replace("override /data: saeed", f"override /data: {name}")
+        content = content.replace("override /model: nano", "override /model: optispeech")
+        content = content.replace("run_name: saeed", f"run_name: {name}")
+        content = content.replace('"saeed"', f'"{name}"')
+        with open(exp_target, "w", encoding="utf-8") as f:
+            f.write(content)
+
+mantoq_dir = os.path.join(LOCAL_REPO, "optispeech", "text", "mantoq")
+if os.path.isdir(mantoq_dir):
+    for root, dirs, files in os.walk(mantoq_dir):
+        if "__init__.py" not in files:
+            with open(os.path.join(root, "__init__.py"), "w", encoding="utf-8") as f:
+                f.write("")
+
+    mantoq_init = os.path.join(mantoq_dir, "__init__.py")
+    if os.path.exists(mantoq_init):
+        with open(mantoq_init, "w", encoding="utf-8") as f:
+            f.write('''import sys, os, importlib.util
+from pathlib import Path
+
+_mantoq_dir = Path(__file__).resolve().parent
+_lib_dir = _mantoq_dir / "lib"
+_buck_dir = _lib_dir / "buck"
+_pyarabic_dir = _lib_dir / "pyarabic"
+_pylibtashkeel_dir = _lib_dir / "pylibtashkeel"
+
+for _p in [_mantoq_dir, _lib_dir, _buck_dir, _pyarabic_dir, _pylibtashkeel_dir]:
+    _ds = str(_p)
+    if os.path.isdir(_ds) and _ds not in sys.path:
+        sys.path.insert(0, _ds)
+
+def _load_mod(mod_name, file_path):
+    spec = importlib.util.spec_from_file_location(mod_name, str(file_path))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+try:
+    from .lib.buck import symbols
+    from .lib.buck.tokenization import (arabic_to_phonemes, phon_to_id_,
+                                        phonemes_to_tokens, simplify_phonemes)
+    from .lib.buck.tokenization import tokens_to_ids as _tokens_to_id
+except Exception:
+    try:
+        import symbols
+        import tokenization
+        arabic_to_phonemes = tokenization.arabic_to_phonemes
+        phon_to_id_ = tokenization.phon_to_id_
+        phonemes_to_tokens = tokenization.phonemes_to_tokens
+        simplify_phonemes = tokenization.simplify_phonemes
+        _tokens_to_id = tokenization.tokens_to_ids
+    except Exception:
+        symbols = _load_mod("symbols", _buck_dir / "symbols.py")
+        phonetise = _load_mod("phonetise_buckwalter", _buck_dir / "phonetise_buckwalter.py")
+        tokenization = _load_mod("tokenization", _buck_dir / "tokenization.py")
+        arabic_to_phonemes = tokenization.arabic_to_phonemes
+        phon_to_id_ = tokenization.phon_to_id_
+        phonemes_to_tokens = tokenization.phonemes_to_tokens
+        simplify_phonemes = tokenization.simplify_phonemes
+        _tokens_to_id = tokenization.tokens_to_ids
+
+from .num2words import num2words
+from .tashkeel import tashkeel
+
+MANTOQ_SYMBOLS = dict(phon_to_id_)
+MANTOQ_SPECIAL_SYMBOLS = dict(
+    pad=MANTOQ_SYMBOLS[symbols.PADDING_TOKEN],
+    eos=MANTOQ_SYMBOLS[symbols.EOS_TOKEN],
+)
+AR_SPECIAL_PUNCS_TABLE = str.maketrans("\u060c\u061f\u061b", ",?;")
+
+def normalize_input_text(text: str, add_tashkeel: bool = True, process_numbers: bool = True) -> str:
+    text = text.translate(AR_SPECIAL_PUNCS_TABLE)
+    if add_tashkeel:
+        text = tashkeel(text)
+    if process_numbers:
+        text = num2words(text)
+    return text
+
+def g2p(text: str, add_tashkeel: bool = True, process_numbers: bool = True, append_eos: bool = False) -> list[str]:
+    normalized_text = normalize_input_text(text, add_tashkeel, process_numbers)
+    phones = arabic_to_phonemes(normalized_text)
+    phones = simplify_phonemes(phones)
+    tokens = phonemes_to_tokens(phones)
+    if not append_eos:
+        tokens = tokens[:-1]
+    return normalized_text, tokens
+
+def tokens2ids(tokens: list[str]) -> list[int]:
+    return _tokens_to_id(tokens)
+''')
+
+SAFE_DEPS = [
+    "lightning>=2.0.0", "torchmetrics>=0.11.4", "nnaudio>=0.3.3", "pyworld>=0.3.4",
+    "hydra-core>=1.3.2", "hydra-colorlog>=1.2.0", "rootutils>=1.0.7", "rich>=13.7.1",
+    "einops>=0.8.0", "unidecode>=1.3.8", "scipy", "pandas", "transformers", "tqdm",
+    "onnx>=1.16.2", "onnxruntime>=1.18.1", "soundfile>=0.12.0", "datasets",
+    "huggingface_hub", "pydub", "resampy", "pyloudnorm>=0.1.1", "torchcrepe", "penn", "soxr",
+]
+
+subprocess.run([sys.executable, "-m", "pip", "install", "-q"] + SAFE_DEPS, check=True, stdout=subprocess.DEVNULL)
+subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--no-deps", "librosa==0.9.2"], check=False, stdout=subprocess.DEVNULL)
+subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--no-deps", "-e", "."], cwd=LOCAL_REPO, check=False, stdout=subprocess.DEVNULL)
+subprocess.run(["apt-get", "install", "-y", "-qq", "ffmpeg", "libsndfile1"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+if LOCAL_REPO not in sys.path:
+    sys.path.insert(0, LOCAL_REPO)
+os.chdir(LOCAL_REPO)
+os.environ["PROJECT_ROOT"] = LOCAL_REPO
+print("Cell 2 Complete: Repo cloned, dependencies & configs loaded.")

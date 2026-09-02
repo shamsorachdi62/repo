@@ -1,0 +1,33 @@
+has_preprocessed_hf = hf_marker_exists(MARKER_PREPROCESS_DONE) or len(hf_list_files(HF_PREPROCESSED_PREFIX)) > 0
+if has_preprocessed_hf:
+    existing_npz = glob.glob(os.path.join(LOCAL_PREPROCESSED, "data", "*.npz"))
+    if not existing_npz:
+        hf_download_folder(HF_PREPROCESSED_PREFIX, KAGGLE_WORKING)
+        src_dir = os.path.join(KAGGLE_WORKING, HF_PREPROCESSED_PREFIX)
+        if os.path.isdir(src_dir) and os.path.abspath(src_dir) != os.path.abspath(LOCAL_PREPROCESSED):
+            shutil.copytree(src_dir, LOCAL_PREPROCESSED)
+    ensure_filelists_exist(LOCAL_PREPROCESSED, LOCAL_RAW_DATASET)
+else:
+    if os.path.exists(LOCAL_PREPROCESSED):
+        shutil.rmtree(LOCAL_PREPROCESSED)
+    cmd = [
+        sys.executable, "-m", "optispeech.tools.preprocess_dataset",
+        EXPERIMENT_NAME, LOCAL_RAW_DATASET, LOCAL_PREPROCESSED,
+        "--n-workers", str(PREPROCESS_WORKERS), "--batch-size", str(PREPROCESS_BATCH_SIZE),
+    ]
+    res = subprocess.run(cmd, cwd=LOCAL_REPO)
+    if res.returncode != 0:
+        raise RuntimeError(f"Preprocessing failed: {res.returncode}")
+    ensure_filelists_exist(LOCAL_PREPROCESSED, LOCAL_RAW_DATASET)
+    hf_upload_folder(LOCAL_PREPROCESSED, HF_PREPROCESSED_PREFIX)
+    hf_set_marker(MARKER_PREPROCESS_DONE)
+    hf_invalidate_cache()
+
+os.makedirs(os.path.dirname(LOCAL_DATA_DIR), exist_ok=True)
+if os.path.islink(LOCAL_DATA_DIR):
+    os.unlink(LOCAL_DATA_DIR)
+elif os.path.isdir(LOCAL_DATA_DIR):
+    shutil.rmtree(LOCAL_DATA_DIR)
+os.symlink(LOCAL_PREPROCESSED, LOCAL_DATA_DIR)
+
+print("Cell 5 Complete: Dataset features preprocessed and symlink created.")

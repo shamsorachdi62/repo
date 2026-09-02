@@ -1,0 +1,41 @@
+if hf_marker_exists(MARKER_STATS_DONE):
+    stats_json = os.path.join(LOCAL_DATA_STATS, "stats.json")
+    if not os.path.exists(stats_json):
+        hf_download_folder(HF_STATS_PREFIX, KAGGLE_WORKING)
+        src = os.path.join(KAGGLE_WORKING, HF_STATS_PREFIX, "stats.json")
+        if os.path.exists(src) and os.path.abspath(src) != os.path.abspath(stats_json):
+            os.makedirs(LOCAL_DATA_STATS, exist_ok=True)
+            shutil.copy2(src, stats_json)
+    if os.path.exists(stats_json):
+        stats = json.load(open(stats_json))
+        cfg_path = os.path.join(LOCAL_REPO, "configs", "data", f"{EXPERIMENT_NAME}.yaml")
+        if os.path.exists(cfg_path):
+            text = open(cfg_path).read()
+            for k, v in stats.items():
+                text = re.sub(rf'({k}:\s*)([\d.\-]+)', rf'\g<1>{v}', text)
+            with open(cfg_path, 'w') as f:
+                f.write(text)
+else:
+    ensure_filelists_exist(LOCAL_PREPROCESSED, LOCAL_RAW_DATASET)
+    cmd = [
+        sys.executable, "-m", "optispeech.tools.generate_data_statistics",
+        EXPERIMENT_NAME, "-b", "64", "-w", str(PREPROCESS_WORKERS), "-o", LOCAL_DATA_STATS,
+    ]
+    res = subprocess.run(cmd, cwd=LOCAL_REPO)
+    if res.returncode != 0:
+        raise RuntimeError("Failed to calculate statistics")
+    stats_json = os.path.join(LOCAL_DATA_STATS, "stats.json")
+    if os.path.exists(stats_json):
+        stats = json.load(open(stats_json))
+        cfg_path = os.path.join(LOCAL_REPO, "configs", "data", f"{EXPERIMENT_NAME}.yaml")
+        if os.path.exists(cfg_path):
+            text = open(cfg_path).read()
+            for k, v in stats.items():
+                text = re.sub(rf'({k}:\s*)([\d.\-]+)', rf'\g<1>{v}', text)
+            with open(cfg_path, 'w') as f:
+                f.write(text)
+    hf_upload_folder(LOCAL_DATA_STATS, HF_STATS_PREFIX)
+    hf_set_marker(MARKER_STATS_DONE)
+    hf_invalidate_cache()
+
+print("Cell 6 Complete: Pitch, Energy, and Mel statistics calculated and injected into YAML.")

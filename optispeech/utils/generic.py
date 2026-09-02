@@ -137,9 +137,17 @@ def intersperse(lst, item):
 
 
 def save_figure_to_numpy(fig):
-    data = np.fromstring(fig.canvas.tostring_rgb(), dtype=np.uint8, sep="")
-    data = data.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+    fig.canvas.draw()
+    if hasattr(fig.canvas, "buffer_rgba"):
+        data = np.asarray(fig.canvas.buffer_rgba())[:, :, :3]
+    elif hasattr(fig.canvas, "tostring_rgb"):
+        data = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+        data = data.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+    else:
+        data = np.frombuffer(fig.canvas.tostring_argb(), dtype=np.uint8)
+        data = data.reshape(fig.canvas.get_width_height()[::-1] + (4,))[:, :, 1:4]
     return data
+
 
 
 def plot_attention(attn):
@@ -195,9 +203,17 @@ def save_figure_to_numpy(fig: plt.Figure) -> np.ndarray:
     Returns:
         ndarray: Numpy array representing the figure.
     """
-    data = np.fromstring(fig.canvas.tostring_rgb(), dtype=np.uint8, sep="")
-    data = data.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+    fig.canvas.draw()
+    if hasattr(fig.canvas, "buffer_rgba"):
+        data = np.asarray(fig.canvas.buffer_rgba())[:, :, :3]
+    elif hasattr(fig.canvas, "tostring_rgb"):
+        data = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+        data = data.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+    else:
+        data = np.frombuffer(fig.canvas.tostring_argb(), dtype=np.uint8)
+        data = data.reshape(fig.canvas.get_width_height()[::-1] + (4,))[:, :, 1:4]
     return data
+
 
 
 def plot_spectrogram_to_numpy(spectrogram, filename):

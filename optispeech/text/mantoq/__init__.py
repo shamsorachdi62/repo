@@ -1,7 +1,60 @@
-from .lib.buck import symbols
-from .lib.buck.tokenization import (arabic_to_phonemes, phon_to_id_,
-                                    phonemes_to_tokens, simplify_phonemes)
-from .lib.buck.tokenization import tokens_to_ids as _tokens_to_id
+import sys, os
+import importlib.util
+from pathlib import Path
+
+_mantoq_dir = Path(__file__).resolve().parent
+_lib_dir = _mantoq_dir / "lib"
+_buck_dir = _lib_dir / "buck"
+_pyarabic_dir = _lib_dir / "pyarabic"
+_pylibtashkeel_dir = _lib_dir / "pylibtashkeel"
+
+for _p in [_mantoq_dir, _lib_dir, _buck_dir, _pyarabic_dir, _pylibtashkeel_dir]:
+    _ds = str(_p)
+    if os.path.isdir(_ds) and _ds not in sys.path:
+        sys.path.insert(0, _ds)
+
+for _p in [_lib_dir, _buck_dir, _pyarabic_dir, _pylibtashkeel_dir]:
+    if os.path.isdir(str(_p)):
+        _init_file = _p / "__init__.py"
+        if not _init_file.exists():
+            try:
+                _init_file.write_text("# __init__\n", encoding="utf-8")
+            except Exception:
+                pass
+
+
+def _load_mod(mod_name, file_path):
+    spec = importlib.util.spec_from_file_location(mod_name, str(file_path))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+try:
+    from .lib.buck import symbols
+    from .lib.buck.tokenization import (arabic_to_phonemes, phon_to_id_,
+                                        phonemes_to_tokens, simplify_phonemes)
+    from .lib.buck.tokenization import tokens_to_ids as _tokens_to_id
+except Exception:
+    try:
+        import symbols
+        import tokenization
+        arabic_to_phonemes = tokenization.arabic_to_phonemes
+        phon_to_id_ = tokenization.phon_to_id_
+        phonemes_to_tokens = tokenization.phonemes_to_tokens
+        simplify_phonemes = tokenization.simplify_phonemes
+        _tokens_to_id = tokenization.tokens_to_ids
+    except Exception:
+        symbols = _load_mod("symbols", _buck_dir / "symbols.py")
+        phonetise = _load_mod("phonetise_buckwalter", _buck_dir / "phonetise_buckwalter.py")
+        tokenization = _load_mod("tokenization", _buck_dir / "tokenization.py")
+        arabic_to_phonemes = tokenization.arabic_to_phonemes
+        phon_to_id_ = tokenization.phon_to_id_
+        phonemes_to_tokens = tokenization.phonemes_to_tokens
+        simplify_phonemes = tokenization.simplify_phonemes
+        _tokens_to_id = tokenization.tokens_to_ids
+
 from .num2words import num2words
 from .tashkeel import tashkeel
 
@@ -10,7 +63,6 @@ MANTOQ_SPECIAL_SYMBOLS = dict(
     pad=MANTOQ_SYMBOLS[symbols.PADDING_TOKEN],
     eos=MANTOQ_SYMBOLS[symbols.EOS_TOKEN],
 )
-# Maps Arabic-specific puncs with their English equivlents
 AR_SPECIAL_PUNCS_TABLE = str.maketrans("،؟؛", ",?;")
 
 

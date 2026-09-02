@@ -1,0 +1,153 @@
+import os, sys, subprocess, shutil, glob
+from pathlib import Path
+
+os.chdir(LOCAL_REPO)
+os.environ["PROJECT_ROOT"] = LOCAL_REPO
+
+mantoq_dir = os.path.join(LOCAL_REPO, "optispeech", "text", "mantoq")
+if os.path.isdir(mantoq_dir):
+    for root, dirs, files in os.walk(mantoq_dir):
+        if "__init__.py" not in files:
+            init_p = os.path.join(root, "__init__.py")
+            with open(init_p, "w", encoding="utf-8") as f:
+                f.write("# __init__.py\n")
+
+    mantoq_init = os.path.join(mantoq_dir, "__init__.py")
+    if os.path.exists(mantoq_init):
+        with open(mantoq_init, "w", encoding="utf-8") as f:
+            f.write('''import sys, os, importlib.util
+from pathlib import Path
+
+_mantoq_dir = Path(__file__).resolve().parent
+_lib_dir = _mantoq_dir / "lib"
+_buck_dir = _lib_dir / "buck"
+_pyarabic_dir = _lib_dir / "pyarabic"
+_pylibtashkeel_dir = _lib_dir / "pylibtashkeel"
+
+for _p in [_mantoq_dir, _lib_dir, _buck_dir, _pyarabic_dir, _pylibtashkeel_dir]:
+    _ds = str(_p)
+    if os.path.isdir(_ds) and _ds not in sys.path:
+        sys.path.insert(0, _ds)
+
+def _load_mod(mod_name, file_path):
+    spec = importlib.util.spec_from_file_location(mod_name, str(file_path))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+try:
+    from .lib.buck import symbols
+    from .lib.buck.tokenization import (arabic_to_phonemes, phon_to_id_,
+                                        phonemes_to_tokens, simplify_phonemes)
+    from .lib.buck.tokenization import tokens_to_ids as _tokens_to_id
+except Exception:
+    try:
+        import symbols
+        import tokenization
+        arabic_to_phonemes = tokenization.arabic_to_phonemes
+        phon_to_id_ = tokenization.phon_to_id_
+        phonemes_to_tokens = tokenization.phonemes_to_tokens
+        simplify_phonemes = tokenization.simplify_phonemes
+        _tokens_to_id = tokenization.tokens_to_ids
+    except Exception:
+        symbols = _load_mod("symbols", _buck_dir / "symbols.py")
+        phonetise = _load_mod("phonetise_buckwalter", _buck_dir / "phonetise_buckwalter.py")
+        tokenization = _load_mod("tokenization", _buck_dir / "tokenization.py")
+        arabic_to_phonemes = tokenization.arabic_to_phonemes
+        phon_to_id_ = tokenization.phon_to_id_
+        phonemes_to_tokens = tokenization.phonemes_to_tokens
+        simplify_phonemes = tokenization.simplify_phonemes
+        _tokens_to_id = tokenization.tokens_to_ids
+
+from .num2words import num2words
+from .tashkeel import tashkeel
+
+MANTOQ_SYMBOLS = dict(phon_to_id_)
+MANTOQ_SPECIAL_SYMBOLS = dict(
+    pad=MANTOQ_SYMBOLS[symbols.PADDING_TOKEN],
+    eos=MANTOQ_SYMBOLS[symbols.EOS_TOKEN],
+)
+AR_SPECIAL_PUNCS_TABLE = str.maketrans("\\u060c\\u061f\\u061b", ",?;")
+
+def normalize_input_text(text: str, add_tashkeel: bool = True, process_numbers: bool = True) -> str:
+    text = text.translate(AR_SPECIAL_PUNCS_TABLE)
+    if add_tashkeel:
+        text = tashkeel(text)
+    if process_numbers:
+        text = num2words(text)
+    return text
+
+def g2p(text: str, add_tashkeel: bool = True, process_numbers: bool = True, append_eos: bool = False) -> list[str]:
+    normalized_text = normalize_input_text(text, add_tashkeel, process_numbers)
+    phones = arabic_to_phonemes(normalized_text)
+    phones = simplify_phonemes(phones)
+    tokens = phonemes_to_tokens(phones)
+    if not append_eos:
+        tokens = tokens[:-1]
+    return normalized_text, tokens
+
+def tokens2ids(tokens: list[str]) -> list[int]:
+    return _tokens_to_id(tokens)
+''')
+
+subprocess.run(
+    [sys.executable, "-m", "pip", "install", "-q", "--no-deps", "-e", "."],
+    cwd=LOCAL_REPO, check=False
+)
+
+has_preprocessed_hf = hf_marker_exists(MARKER_PREPROCESS_DONE) or len(hf_list_files(HF_PREPROCESSED_PREFIX)) > 0
+
+if has_preprocessed_hf:
+    print("Phase 4 (Preprocess): Phonemes & preprocessed features found in HF backup.")
+    existing_npz = glob.glob(os.path.join(LOCAL_PREPROCESSED, "data", "*.npz"))
+    if not existing_npz:
+        print("Downloading preprocessed MANTOQ phonemes and features from HF backup...")
+        hf_download_folder(HF_PREPROCESSED_PREFIX, KAGGLE_WORKING)
+        src_dir = os.path.join(KAGGLE_WORKING, HF_PREPROCESSED_PREFIX)
+        if os.path.isdir(src_dir) and not os.path.isdir(LOCAL_PREPROCESSED):
+            shutil.copytree(src_dir, LOCAL_PREPROCESSED)
+        npz_count = len(glob.glob(os.path.join(LOCAL_PREPROCESSED, "data", "*.npz")))
+        json_count = len(glob.glob(os.path.join(LOCAL_PREPROCESSED, "data", "*.json")))
+        print(f"Restored {npz_count} feature files and {json_count} phoneme JSON files from HF.")
+    else:
+        print(f"Local preprocessed data found: {len(existing_npz)} files.")
+
+    os.makedirs(os.path.dirname(LOCAL_DATA_DIR), exist_ok=True)
+    if os.path.islink(LOCAL_DATA_DIR):
+        os.unlink(LOCAL_DATA_DIR)
+    if os.path.isdir(LOCAL_DATA_DIR):
+        shutil.rmtree(LOCAL_DATA_DIR)
+    os.symlink(LOCAL_PREPROCESSED, LOCAL_DATA_DIR)
+    print(f"Linked {LOCAL_DATA_DIR} -> {LOCAL_PREPROCESSED}")
+else:
+    print("Phase 4: Preprocessing audio features & MANTOQ phonemes from scratch...")
+
+    if os.path.isdir(LOCAL_PREPROCESSED):
+        shutil.rmtree(LOCAL_PREPROCESSED)
+
+    cmd = [
+        sys.executable, "-m", "optispeech.tools.preprocess_dataset",
+        EXPERIMENT_NAME,
+        LOCAL_RAW_DATASET,
+        LOCAL_PREPROCESSED,
+        "--n-workers", str(PREPROCESS_WORKERS),
+        "--batch-size", "8",
+    ]
+    print(f"Executing: {' '.join(cmd)}")
+    res = subprocess.run(cmd, cwd=LOCAL_REPO)
+
+    if res.returncode != 0:
+        raise RuntimeError(f"Preprocessing failed with exit code {res.returncode}")
+
+    os.makedirs(os.path.dirname(LOCAL_DATA_DIR), exist_ok=True)
+    if os.path.islink(LOCAL_DATA_DIR):
+        os.unlink(LOCAL_DATA_DIR)
+    elif os.path.isdir(LOCAL_DATA_DIR):
+        shutil.rmtree(LOCAL_DATA_DIR)
+    os.symlink(LOCAL_PREPROCESSED, LOCAL_DATA_DIR)
+
+    print("Uploading preprocessed data to HF backup...")
+    hf_upload_folder(LOCAL_PREPROCESSED, HF_PREPROCESSED_PREFIX)
+    hf_set_marker(MARKER_PREPROCESS_DONE)
+    print("Phase 4 complete.")

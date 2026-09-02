@@ -27,5 +27,6 @@ setup(
         "onnx>=1.16.2",
         "onnxruntime>=1.18.1",
         "numpy>=1.24.0",
+        "pyloudnorm>=0.1.1",
     ],
 )

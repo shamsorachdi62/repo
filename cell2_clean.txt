@@ -507,7 +507,7 @@ if has_preprocessed_hf:
     ensure_filelists_exist(LOCAL_PREPROCESSED, LOCAL_RAW_DATASET)
 else:
     if os.path.exists(LOCAL_PREPROCESSED):
-        shutil.rmtree(LOCAL_PREPROCESSED)
+        shutil.rmtree(LOCAL_PREPROCESSED, ignore_errors=True)
     cmd = [
         sys.executable, "-m", "optispeech.tools.preprocess_dataset",
         EXPERIMENT_NAME, LOCAL_RAW_DATASET, LOCAL_PREPROCESSED,

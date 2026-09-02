@@ -90,26 +90,29 @@ def hf_set_marker(marker_name):
     os.unlink(tmp.name)
 
 def hf_upload_folder(local_path, path_in_repo, delete_patterns=None):
-    if hasattr(hf_api, "upload_large_folder"):
+    try:
+        kwargs = dict(
+            folder_path=local_path,
+            path_in_repo=path_in_repo,
+            repo_id=HF_BACKUP_REPO,
+            repo_type="model",
+            multi_commits=True,
+            multi_commits_verbose=True,
+            max_workers=4,
+        )
+        if delete_patterns:
+            kwargs["delete_patterns"] = delete_patterns
+        hf_api.upload_folder(**kwargs)
+    except Exception:
         try:
-            hf_api.upload_large_folder(
+            hf_api.upload_folder(
                 folder_path=local_path,
                 path_in_repo=path_in_repo,
                 repo_id=HF_BACKUP_REPO,
                 repo_type="model",
             )
-            return
         except Exception:
             pass
-    kwargs = dict(
-        folder_path=local_path,
-        path_in_repo=path_in_repo,
-        repo_id=HF_BACKUP_REPO,
-        repo_type="model",
-    )
-    if delete_patterns:
-        kwargs["delete_patterns"] = delete_patterns
-    hf_api.upload_folder(**kwargs)
 
 def hf_upload_file(local_path, path_in_repo):
     hf_api.upload_file(

@@ -1,0 +1,155 @@
+import os, sys, glob, json, re, random, shutil, zipfile, subprocess
+from pathlib import Path
+
+# 1. Install Dependencies
+pkgs = ["datasets", "huggingface_hub>=0.20.0", "soundfile>=0.12.0", "pyloudnorm>=0.1.1", "librosa>=0.9.2", "pydub", "lightning>=2.0.0", "torchmetrics>=0.11.4", "nnaudio>=0.3.3", "pyworld>=0.3.4", "hydra-core>=1.3.2", "hydra-colorlog>=1.2.0", "rootutils>=1.0.7", "rich>=13.7.1", "einops>=0.8.0", "unidecode>=1.3.8", "scipy>=1.14.0", "pandas>=2.2.2", "transformers>=4.44.0", "tqdm>=4.66.5"]
+try:
+    subprocess.run(["apt-get", "update", "-qq"], check=False)
+    subprocess.run(["apt-get", "install", "-y", "-qq", "ffmpeg", "libsndfile1"], check=False)
+except Exception: pass
+subprocess.check_call([sys.executable, "-m", "pip", "install", "-q"] + pkgs)
+
+import numpy as np
+import soundfile as sf
+from huggingface_hub import HfApi, hf_hub_download, snapshot_download, create_repo
+
+# 2. Config & Setup
+HF_TOKEN = os.getenv("HF_TOKEN", "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").strip()
+HF_DATASET_ID = "Mohamad-I8/Aseel_Arabic_Dataset"
+ZIP_FILENAME = "Aseel Arabic Dataset.zip"
+KAGGLE_WORKING = "/kaggle/working" if os.path.exists("/kaggle/working") else os.getcwd()
+REPO_URL = "https://github.com/shamsorachdi62/repo.git"
+EXPERIMENT_NAME = "saeed"
+SAMPLE_RATE = 24000
+PREPROCESS_WORKERS = max(1, (os.cpu_count() or 2) // 2)
+
+REPO_DIR = os.path.join(KAGGLE_WORKING, "repo") if os.path.exists("/kaggle/working") else os.getcwd()
+RAW_DATASET_DIR = os.path.join(KAGGLE_WORKING, "raw_dataset")
+CONVERTED_WAV_DIR = os.path.join(RAW_DATASET_DIR, "wav")
+PROCESSED_DATA_DIR = os.path.join(KAGGLE_WORKING, "processed_data")
+DATA_STATS_DIR = os.path.join(KAGGLE_WORKING, "data_stats")
+
+for d in [RAW_DATASET_DIR, CONVERTED_WAV_DIR, DATA_STATS_DIR]:
+    os.makedirs(d, exist_ok=True)
+
+if os.path.exists("/kaggle/working") and not os.path.exists(REPO_DIR):
+    subprocess.run(["git", "clone", REPO_URL, REPO_DIR], check=True)
+
+if REPO_DIR not in sys.path:
+    sys.path.insert(0, REPO_DIR)
+os.chdir(REPO_DIR)
+os.environ["PROJECT_ROOT"] = REPO_DIR
+
+# 3. Audio Validation & Conversion Helpers
+def is_valid_audio(fp):
+    try:
+        return os.path.exists(fp) and os.path.getsize(fp) >= 200 and sf.info(fp).duration >= 0.1 and sf.info(fp).frames > 0
+    except Exception:
+        return False
+
+def convert_mp3_to_wav(src, dst, target_sr=SAMPLE_RATE):
+    try:
+        import librosa
+        wav, _ = librosa.load(src, sr=target_sr, mono=True)
+        if len(wav) > 0 and np.isfinite(wav).all():
+            sf.write(dst, wav, target_sr, subtype="PCM_16")
+            if is_valid_audio(dst): return True
+    except Exception: pass
+    try:
+        from pydub import AudioSegment
+        audio = AudioSegment.from_file(src).set_frame_rate(target_sr).set_channels(1).set_sample_width(2)
+        audio.export(dst, format="wav")
+        if is_valid_audio(dst): return True
+    except Exception: pass
+    try:
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(src), "-ar", str(target_sr), "-ac", "1", "-sample_fmt", "s16", str(dst)], check=True, capture_output=True)
+        if is_valid_audio(dst): return True
+    except Exception: pass
+    return False
+
+# 4. Download & Extract Dataset
+dl_dir = os.path.join(KAGGLE_WORKING, "_download")
+os.makedirs(dl_dir, exist_ok=True)
+try:
+    zip_path = hf_hub_download(repo_id=HF_DATASET_ID, filename=ZIP_FILENAME, repo_type="dataset", local_dir=dl_dir, token=HF_TOKEN or None)
+except Exception:
+    snapshot_download(repo_id=HF_DATASET_ID, repo_type="dataset", local_dir=dl_dir, token=HF_TOKEN or None)
+    zip_path = glob.glob(os.path.join(dl_dir, "**", "*.zip"), recursive=True)[0]
+
+extracted_dir = os.path.join(KAGGLE_WORKING, "_extracted")
+with zipfile.ZipFile(zip_path, "r") as z: z.extractall(extracted_dir)
+
+mp3_files = [os.path.join(r, f) for r, _, fs in os.walk(extracted_dir) for f in fs if f.lower().endswith((".mp3", ".wav", ".flac", ".ogg"))]
+transcript_map = {}
+for r, _, fs in os.walk(extracted_dir):
+    for f in fs:
+        if f.lower() in ("metadata.csv", "transcript.csv", "transcripts.csv", "metadata.txt", "train.csv"):
+            try:
+                with open(os.path.join(r, f), encoding="utf-8", errors="ignore") as file:
+                    for line in file:
+                        parts = line.strip().split("|") if "|" in line else line.strip().split(",")
+                        if len(parts) >= 2 and parts[0].strip():
+                            transcript_map[Path(parts[0].strip()).stem] = parts[-1].strip()
+            except Exception: pass
+
+# 5. Convert MP3s to WAV
+converted, valid_entries = 0, []
+for idx, mp3 in enumerate(mp3_files):
+    clean_id = f"aseel_{idx+1:06d}"
+    dst_wav = os.path.join(CONVERTED_WAV_DIR, f"{clean_id}.wav")
+    text = transcript_map.get(Path(mp3).stem, Path(mp3).stem)
+    if convert_mp3_to_wav(mp3, dst_wav):
+        converted += 1
+        valid_entries.append((clean_id, text))
+    elif os.path.exists(dst_wav):
+        os.remove(dst_wav)
+
+# 6. Generate Metadata
+random.seed(42)
+random.shuffle(valid_entries)
+
+with open(os.path.join(RAW_DATASET_DIR, "metadata.csv"), "w", encoding="utf-8", newline="\n") as f:
+    f.write("file_name,text\n")
+    for fid, txt in valid_entries:
+        clean_txt = txt.replace('"', '""').replace("\n", " ").strip()
+        f.write(f'wav/{fid}.wav,"{clean_txt}"\n')
+
+val_size = max(1, int(len(valid_entries) * 0.05))
+for fname, entries in [("train.csv", valid_entries[val_size:]), ("val.csv", valid_entries[:val_size])]:
+    with open(os.path.join(RAW_DATASET_DIR, fname), "w", encoding="utf-8", newline="\n") as f:
+        for fid, txt in entries:
+            f.write(f"{fid}|{txt.replace('|', ' ').strip()}\n")
+
+readme = f"---\nlanguage:\n- ar\nlicense: mit\ntags:\n- audio\n- speech\n- text-to-speech\n- arabic\n---\n# 🎙️ Aseel Arabic Speech Dataset\nUncompressed 24kHz Mono WAV dataset containing {converted} audio clips."
+with open(os.path.join(RAW_DATASET_DIR, "README.md"), "w", encoding="utf-8") as f: f.write(readme)
+
+# 7. Upload to HuggingFace Hub
+if HF_TOKEN:
+    try:
+        api = HfApi(token=HF_TOKEN)
+        create_repo(repo_id=HF_DATASET_ID, repo_type="dataset", exist_ok=True, token=HF_TOKEN)
+        for ef in api.list_repo_files(repo_id=HF_DATASET_ID, repo_type="dataset"):
+            if ef.lower().endswith((".zip", ".tar.gz", ".tgz", ".rar")):
+                try: api.delete_file(path_in_repo=ef, repo_id=HF_DATASET_ID, repo_type="dataset", token=HF_TOKEN)
+                except Exception: pass
+        api.upload_folder(folder_path=RAW_DATASET_DIR, repo_id=HF_DATASET_ID, repo_type="dataset", token=HF_TOKEN, ignore_patterns=["_snapshot*", "_tmp*", "_download*", "_extracted*"])
+        print("✅ Published to Hugging Face Hub!")
+    except Exception as e:
+        print(f"⚠️ HF Upload Notice: {e}")
+
+# 8. Local Preprocessing & Data Statistics
+if os.path.exists(PROCESSED_DATA_DIR): shutil.rmtree(PROCESSED_DATA_DIR)
+subprocess.run([sys.executable, "-m", "optispeech.tools.preprocess_dataset", EXPERIMENT_NAME, RAW_DATASET_DIR, PROCESSED_DATA_DIR, "--n-workers", str(PREPROCESS_WORKERS), "--batch-size", "8"], cwd=REPO_DIR, check=True)
+
+subprocess.run([sys.executable, "-m", "optispeech.tools.generate_data_statistics", EXPERIMENT_NAME, "-b", "32", "-w", "2", "-o", DATA_STATS_DIR], cwd=REPO_DIR, check=True)
+
+stats_json = os.path.join(DATA_STATS_DIR, "stats.json")
+if os.path.exists(stats_json):
+    stats = json.load(open(stats_json, encoding="utf-8"))
+    cfg_path = os.path.join(REPO_DIR, "configs", "data", f"{EXPERIMENT_NAME}.yaml")
+    if os.path.exists(cfg_path):
+        txt = open(cfg_path, encoding="utf-8").read()
+        for k, v in stats.items(): txt = re.sub(rf"({k}:\s*)([\d.\-]+)", rf"\g<1>{v}", txt)
+        with open(cfg_path, "w", encoding="utf-8") as f: f.write(txt)
+
+print("🎉 Preprocessing & Statistics Complete!")

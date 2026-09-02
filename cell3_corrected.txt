@@ -1,4 +1,4 @@
-import subprocess, sys, os, torch
+import subprocess, sys, os, shutil, torch
 
 if torch.cuda.is_available():
     gpu_name = torch.cuda.get_device_name(0)
@@ -25,6 +25,38 @@ else:
     subprocess.run(["git", "clone", GITHUB_REPO_URL, LOCAL_REPO], check=True)
     print("Repository cloned.")
 
+mantoq_lib_dir = os.path.join(LOCAL_REPO, "optispeech", "text", "mantoq", "lib")
+symbols_file = os.path.join(mantoq_lib_dir, "buck", "symbols.py")
+if not os.path.exists(symbols_file):
+    print("\nmantoq_lib files missing from git clone. Downloading mantoq_lib from HF backup...")
+    try:
+        from huggingface_hub import snapshot_download
+        dl_dir = os.path.join(KAGGLE_WORKING, "_mantoq_tmp")
+        snapshot_download(
+            repo_id=HF_BACKUP_REPO, repo_type="model",
+            local_dir=dl_dir, allow_patterns="mantoq_lib/**",
+            token=ACTIVE_HF_TOKEN,
+        )
+        src = os.path.join(dl_dir, "mantoq_lib")
+        if os.path.exists(src):
+            if os.path.exists(mantoq_lib_dir):
+                shutil.rmtree(mantoq_lib_dir)
+            shutil.copytree(src, mantoq_lib_dir)
+            print("Successfully restored all mantoq_lib phonemizer files!")
+    except Exception as e_m:
+        print(f"Warning restoring mantoq_lib: {e_m}")
+
+configs_data_dir = os.path.join(LOCAL_REPO, "configs", "data")
+template_yaml = os.path.join(configs_data_dir, "saeed.yaml")
+for name in [EXPERIMENT_NAME, EXPERIMENT_NAME.lower(), EXPERIMENT_NAME.upper()]:
+    target_yaml = os.path.join(configs_data_dir, f"{name}.yaml")
+    if not os.path.exists(target_yaml) and os.path.exists(template_yaml):
+        content = open(template_yaml, encoding="utf-8").read()
+        content = content.replace("name: saeed", f"name: {name}")
+        with open(target_yaml, "w", encoding="utf-8") as f:
+            f.write(content)
+        print(f"Auto-created dataset config: {target_yaml}")
+
 mantoq_dir = os.path.join(LOCAL_REPO, "optispeech", "text", "mantoq")
 if os.path.isdir(mantoq_dir):
     for root, dirs, files in os.walk(mantoq_dir):
@@ -32,7 +64,6 @@ if os.path.isdir(mantoq_dir):
             init_p = os.path.join(root, "__init__.py")
             with open(init_p, "w", encoding="utf-8") as f:
                 f.write("# __init__.py\n")
-            print(f"Created missing init: {init_p}")
 
 SAFE_DEPS = [
     "lightning>=2.0.0",
@@ -57,6 +88,8 @@ SAFE_DEPS = [
     "pydub",
     "resampy",
     "pyloudnorm>=0.1.1",
+    "torchcrepe",
+    "penn",
 ]
 
 print("\nInstalling model dependencies...")

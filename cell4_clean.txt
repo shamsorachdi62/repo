@@ -1,51 +1,113 @@
-QUANTIZE_INT8 = True
-TEST_TEXT = "مرحبا، هذا اختبار لنموذج التحويل الصوتي."
+import os, sys, glob, subprocess, shutil, tempfile, tarfile
+from pathlib import Path
 
-import os, sys, glob, subprocess, shutil
+# ==================== 1. CONFIGURATION & AUTH ====================
+HF_BACKUP_REPO = "Mohamad-I8/tts-training-backup"
+HF_TOKEN = "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"
+EXPERIMENT_NAME = "ASEEL"
+PREPROCESS_WORKERS = max(2, os.cpu_count() or 4)
+PREPROCESS_BATCH_SIZE = 32
+
+KAGGLE_WORKING = "/kaggle/working"
+LOCAL_REPO = os.path.join(KAGGLE_WORKING, "repo")
+LOCAL_RAW_DATASET = os.path.join(KAGGLE_WORKING, "raw_dataset")
+LOCAL_PREPROCESSED = os.path.join(KAGGLE_WORKING, "preprocessed_data")
+LOCAL_DATA_DIR = os.path.join(LOCAL_REPO, "data", EXPERIMENT_NAME)
+
+ACTIVE_HF_TOKEN = None
+try:
+    from kaggle_secrets import UserSecretsClient
+    ACTIVE_HF_TOKEN = UserSecretsClient().get_secret("HF_TOKEN")
+except Exception:
+    pass
+if not ACTIVE_HF_TOKEN:
+    ACTIVE_HF_TOKEN = os.environ.get("HF_TOKEN", HF_TOKEN)
+
+from huggingface_hub import HfApi, login, hf_hub_download
+login(token=ACTIVE_HF_TOKEN, add_to_git_credential=False)
+hf_api = HfApi(token=ACTIVE_HF_TOKEN)
+
+# ==================== 2. SMART TAR ARCHIVE UPLOADER (ZERO FREEZING) ====================
+def hf_upload_preprocessed_tar(local_folder, repo_folder):
+    tar_path = os.path.join(KAGGLE_WORKING, "preprocessed_data.tar.gz")
+    print(f"📦 Compressing {local_folder} into {tar_path} for ultra-fast, 100% stable upload...")
+    with tarfile.open(tar_path, "w:gz") as tar:
+        tar.add(local_folder, arcname="preprocessed_data")
+    
+    file_size_gb = os.path.getsize(tar_path) / (1024**3)
+    print(f"🚀 Uploading single archive ({file_size_gb:.2f} GB) to HF/{repo_folder}...")
+    
+    hf_api.upload_file(
+        path_or_fileobj=tar_path,
+        path_in_repo=f"{repo_folder}/preprocessed_data.tar.gz",
+        repo_id=HF_BACKUP_REPO,
+        repo_type="model",
+    )
+    print("✅ Archive uploaded to Hugging Face successfully!")
+    if os.path.exists(tar_path):
+        os.remove(tar_path)
+
+# ==================== 3. CONFIGURE FAST DIO PITCH EXTRACTOR ====================
+fe_yaml = os.path.join(LOCAL_REPO, "configs", "data", "feature_extractor", "default.yaml")
+if os.path.exists(fe_yaml):
+    content = open(fe_yaml, encoding="utf-8").read()
+    if "HarvestPitchExtractor" in content:
+        content = content.replace("HarvestPitchExtractor", "DIOPitchExtractor")
+        with open(fe_yaml, "w", encoding="utf-8") as f:
+            f.write(content)
+        print("⚡ Configured fast DIOPitchExtractor in default.yaml")
+
+# ==================== 4. PREPROCESS DATASET ====================
 os.chdir(LOCAL_REPO)
 os.environ["PROJECT_ROOT"] = LOCAL_REPO
 
-if 'hf_list_files' not in globals():
-    _cached_repo_files = None
-    def hf_list_files(path_prefix):
-        global _cached_repo_files
-        if _cached_repo_files is None:
-            try:
-                _cached_repo_files = [f.rfilename for f in hf_api.list_repo_tree(repo_id=HF_BACKUP_REPO, repo_type="model", recursive=True) if hasattr(f, "rfilename")]
-            except Exception:
-                _cached_repo_files = []
-        return [f for f in _cached_repo_files if f.startswith(path_prefix)]
+data_dir = os.path.join(LOCAL_PREPROCESSED, "data")
+npz_files = glob.glob(os.path.join(data_dir, "*.npz")) if os.path.exists(data_dir) else []
 
-ckpts = sorted(glob.glob(os.path.join(LOCAL_CHECKPOINTS, "**", "*.ckpt"), recursive=True), key=os.path.getmtime)
-if not ckpts:
-    hf_ckpt_files = [f for f in hf_list_files(HF_CHECKPOINTS_PREFIX) if f.endswith(".ckpt")]
-    if hf_ckpt_files:
-        target_hf_file = f"{HF_CHECKPOINTS_PREFIX}/last.ckpt" if f"{HF_CHECKPOINTS_PREFIX}/last.ckpt" in hf_ckpt_files else sorted(hf_ckpt_files)[-1]
-        local_path = hf_hub_download(repo_id=HF_BACKUP_REPO, filename=target_hf_file, repo_type="model", local_dir=KAGGLE_WORKING, token=ACTIVE_HF_TOKEN)
-        dest = os.path.join(LOCAL_CHECKPOINTS, os.path.basename(target_hf_file))
-        os.makedirs(LOCAL_CHECKPOINTS, exist_ok=True)
-        if os.path.abspath(local_path) != os.path.abspath(dest):
-            shutil.copy2(local_path, dest)
-            if os.path.exists(local_path):
-                try:
-                    os.remove(local_path)
-                except Exception:
-                    pass
-        ckpts = sorted(glob.glob(os.path.join(LOCAL_CHECKPOINTS, "**", "*.ckpt"), recursive=True), key=os.path.getmtime)
+if not npz_files:
+    print("🔄 Running dataset preprocessing with DIO pitch extraction...")
+    if os.path.islink(LOCAL_PREPROCESSED):
+        try: os.unlink(LOCAL_PREPROCESSED)
+        except Exception: pass
+    elif os.path.exists(LOCAL_PREPROCESSED):
+        shutil.rmtree(LOCAL_PREPROCESSED, ignore_errors=True)
+        
+    cmd = [
+        sys.executable, "-m", "optispeech.tools.preprocess_dataset",
+        EXPERIMENT_NAME, LOCAL_RAW_DATASET, LOCAL_PREPROCESSED,
+        "--n-workers", str(PREPROCESS_WORKERS), "--batch-size", str(PREPROCESS_BATCH_SIZE),
+    ]
+    res = subprocess.run(cmd, cwd=LOCAL_REPO)
+    if res.returncode != 0:
+        raise RuntimeError(f"Preprocessing failed with exit code: {res.returncode}")
 
-if ckpts:
-    checkpoint_path = ckpts[-1]
-    export_cmd = [sys.executable, "-m", "optispeech.onnx.nano_streaming", "--checkpoint", checkpoint_path, "--output-dir", LOCAL_ONNX_EXPORT, "--text", TEST_TEXT]
-    if QUANTIZE_INT8:
-        export_cmd.append("--quantize-encoder-decoder")
-    res = subprocess.run(export_cmd, cwd=LOCAL_REPO)
-    if res.returncode == 0:
-        old_onnx = hf_list_files(HF_ONNX_PREFIX)
-        if old_onnx:
-            hf_delete_files(old_onnx)
-        hf_upload_folder(LOCAL_ONNX_EXPORT, HF_ONNX_PREFIX)
-        print("Cell 4 Complete: ONNX models exported & uploaded to Hugging Face successfully.")
-    else:
-        print("ONNX export failed.")
-else:
-    print("No checkpoint found for ONNX export.")
+if 'ensure_filelists_exist' in globals():
+    ensure_filelists_exist(LOCAL_PREPROCESSED, LOCAL_RAW_DATASET)
+
+os.makedirs(os.path.dirname(LOCAL_DATA_DIR), exist_ok=True)
+if os.path.islink(LOCAL_DATA_DIR):
+    try: os.unlink(LOCAL_DATA_DIR)
+    except Exception: pass
+elif os.path.isdir(LOCAL_DATA_DIR):
+    shutil.rmtree(LOCAL_DATA_DIR, ignore_errors=True)
+os.symlink(LOCAL_PREPROCESSED, LOCAL_DATA_DIR)
+
+# ==================== 5. STABLE TAR UPLOAD TO HF ====================
+hf_upload_preprocessed_tar(LOCAL_PREPROCESSED, "preprocessed_data")
+
+try:
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".marker")
+    tmp.write(b"done")
+    tmp.close()
+    hf_api.upload_file(
+        path_or_fileobj=tmp.name,
+        path_in_repo=".markers/04_preprocess_done",
+        repo_id=HF_BACKUP_REPO,
+        repo_type="model",
+    )
+    os.unlink(tmp.name)
+    print("📌 Preprocess marker set successfully!")
+except Exception:
+    pass
+
+print("🎉 Complete! Preprocessed features compressed & uploaded as single archive without freezing.")

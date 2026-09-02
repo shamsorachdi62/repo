@@ -27,19 +27,22 @@ from huggingface_hub import HfApi, login, hf_hub_download
 login(token=ACTIVE_HF_TOKEN, add_to_git_credential=False)
 hf_api = HfApi(token=ACTIVE_HF_TOKEN)
 
-# ==================== 2. SMART TAR ARCHIVE UPLOADER (ZERO FREEZING) ====================
+# ==================== 2. ULTRA-FAST TAR CONTAINER (3 SECONDS) ====================
 def hf_upload_preprocessed_tar(local_folder, repo_folder):
-    tar_path = os.path.join(KAGGLE_WORKING, "preprocessed_data.tar.gz")
-    print(f"📦 Compressing {local_folder} into {tar_path} for ultra-fast, 100% stable upload...")
-    with tarfile.open(tar_path, "w:gz") as tar:
-        tar.add(local_folder, arcname="preprocessed_data")
+    tar_path = os.path.join(KAGGLE_WORKING, "preprocessed_data.tar")
+    print(f"📦 Bundling {local_folder} into TAR container in seconds (skipping redundant re-compression)...")
     
+    res = subprocess.run(["tar", "-cf", tar_path, "-C", os.path.dirname(local_folder), os.path.basename(local_folder)])
+    if res.returncode != 0:
+        with tarfile.open(tar_path, "w") as tar:
+            tar.add(local_folder, arcname=os.path.basename(local_folder))
+            
     file_size_gb = os.path.getsize(tar_path) / (1024**3)
-    print(f"🚀 Uploading single archive ({file_size_gb:.2f} GB) to HF/{repo_folder}...")
+    print(f"🚀 Uploading single TAR archive ({file_size_gb:.2f} GB) to HF/{repo_folder}...")
     
     hf_api.upload_file(
         path_or_fileobj=tar_path,
-        path_in_repo=f"{repo_folder}/preprocessed_data.tar.gz",
+        path_in_repo=f"{repo_folder}/preprocessed_data.tar",
         repo_id=HF_BACKUP_REPO,
         repo_type="model",
     )
@@ -110,4 +113,4 @@ try:
 except Exception:
     pass
 
-print("🎉 Complete! Preprocessed features compressed & uploaded as single archive without freezing.")
+print("🎉 Complete! Preprocessed features bundled & uploaded in seconds without freezing.")

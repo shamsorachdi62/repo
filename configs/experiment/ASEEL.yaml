@@ -1,12 +1,12 @@
 # @package _global_
 
 # to execute this experiment run:
-# python -m optispeech.train experiment=aseel
+# python -m optispeech.train experiment=ASEEL
 
 defaults:
-  - override /data: aseel
+  - override /data: ASEEL
   - override /model: optispeech
 
-tags: ["aseel", "light", "arabic", "single_speaker", "male", "ar"]
+tags: ["ASEEL", "light", "arabic", "single_speaker", "male", "ar"]
 
-run_name: aseel
+run_name: ASEEL

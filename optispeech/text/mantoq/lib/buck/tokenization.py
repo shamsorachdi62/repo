@@ -1,12 +1,6 @@
-try:
-    from .phonetise_buckwalter import (arabic_to_buckwalter, buckwalter_to_arabic,
-                                       process_utterance)
-    from .symbols import DOUBLING_TOKEN, EOS_TOKEN, SEPARATOR_TOKEN, symbols
-except (ImportError, ModuleNotFoundError):
-    from phonetise_buckwalter import (arabic_to_buckwalter, buckwalter_to_arabic,
-                                      process_utterance)
-    from symbols import DOUBLING_TOKEN, EOS_TOKEN, SEPARATOR_TOKEN, symbols
-
+from .phonetise_buckwalter import (arabic_to_buckwalter, buckwalter_to_arabic,
+                                   process_utterance)
+from .symbols import DOUBLING_TOKEN, EOS_TOKEN, SEPARATOR_TOKEN, symbols
 
 vowels = [
     "aa",

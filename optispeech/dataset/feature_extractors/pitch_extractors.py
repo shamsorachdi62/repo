@@ -8,18 +8,10 @@ import librosa
 import numpy as np
 import torch
 import torchaudio
+import torchcrepe
+import penn
 import pyworld as pw
 from scipy.interpolate import interp1d
-
-try:
-    import torchcrepe
-except ImportError:
-    torchcrepe = None
-
-try:
-    import penn
-except ImportError:
-    penn = None
 
 from optispeech.utils import pylogger, trim_or_pad_to_target_length
 
@@ -58,8 +50,6 @@ class BasePitchExtractor(ABC):
     def perform_interpolation(pitch):
         # interpolate to cover the unvoiced segments as well
         nonzero_ids = np.where(pitch != 0)[0]
-        if len(nonzero_ids) == 0:
-            return pitch
         interp_fn = interp1d(
             nonzero_ids,
             pitch[nonzero_ids],
@@ -91,3 +81,4 @@ class DIOPitchExtractor(BasePitchExtractor):
 
 class HarvestPitchExtractor(DIOPitchExtractor):
     _METHOD: str = "harvest"
+

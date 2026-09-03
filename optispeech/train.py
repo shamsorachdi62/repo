@@ -1,6 +1,22 @@
 import warnings
 from typing import Any, Dict, List, Optional, Tuple
 
+import torch
+
+# Fix PyTorch 2.6+ weights_only=True default breaking Lightning checkpoint resumption
+_orig_torch_load = torch.load
+def _torch_load_compat(*args, **kwargs):
+    kwargs["weights_only"] = False
+    return _orig_torch_load(*args, **kwargs)
+torch.load = _torch_load_compat
+
+if hasattr(torch.serialization, "add_safe_globals"):
+    try:
+        import hydra._internal.target_policy
+        torch.serialization.add_safe_globals([hydra._internal.target_policy._DeferredTarget])
+    except Exception:
+        pass
+
 import hydra
 import lightning as L
 import rootutils

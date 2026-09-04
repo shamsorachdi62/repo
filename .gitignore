@@ -18,6 +18,10 @@ eggs/
 /lib64/
 !optispeech/text/mantoq/lib/
 !optispeech/text/mantoq/lib/**
+optispeech/text/mantoq/lib/**/__pycache__/
+optispeech/text/mantoq/diacritizer/**/__pycache__/
+aseel_003772.wav
+scratch/
 parts/
 sdist/
 var/

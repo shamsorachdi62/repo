@@ -1,3 +1,16 @@
+import torch
+_orig_torch_load = torch.load
+def _torch_load_compat(*args, **kwargs):
+    kwargs['weights_only'] = False
+    return _orig_torch_load(*args, **kwargs)
+torch.load = _torch_load_compat
+if hasattr(torch.serialization, 'add_safe_globals'):
+    try:
+        import hydra._internal.target_policy
+        torch.serialization.add_safe_globals([hydra._internal.target_policy._DeferredTarget])
+    except Exception:
+        pass
+
 import argparse
 import os
 from pathlib import Path
@@ -7,7 +20,6 @@ import numpy as np
 import onnx
 import onnxruntime as ort
 from onnxruntime.quantization import QuantType, quantize_dynamic
-import torch
 import torch.nn.functional as F
 from torch import nn
 

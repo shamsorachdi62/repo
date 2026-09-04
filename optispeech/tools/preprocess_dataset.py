@@ -82,6 +82,10 @@ def process_row(row):
     audio_path = audio_path.resolve()
     sid = _worker_sids.index(speaker.strip().lower()) if speaker else None
     lid = _worker_lids.index(lang.strip().lower()) if lang else None
+    out_arrays = _worker_data_dir.joinpath(audio_path.stem + ".npz")
+    out_json = _worker_data_dir.joinpath(audio_path.stem + ".json")
+    if out_arrays.is_file() and out_json.is_file() and out_arrays.stat().st_size > 500:
+        return audio_path.stem, True
     try:
         data = do_preprocess_utterance(
             feature_extractor=_worker_feature_extractor,
@@ -237,12 +241,9 @@ def main():
     sids, lids = get_sids_and_lids(dataset, all_utterances)
     # Start
     output_dir = Path(args.output_dir)
-    if output_dir.is_dir():
-        log.error(f"Output directory {output_dir} already exist. Stopping")
-        exit(1)
-    output_dir.mkdir(parents=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
     data_dir = output_dir.joinpath("data")
-    data_dir.mkdir()
+    data_dir.mkdir(exist_ok=True)
     # eSpeak uses global state for language.
     # Comment this line if you're not using eSpeak for phonemization
     n_workers = args.n_workers if not text_processor.is_multi_language else 1

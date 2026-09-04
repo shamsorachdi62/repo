@@ -6,7 +6,10 @@ from typing import Any, Dict, Optional
 
 import librosa
 import numpy as np
-import pyworld as pw
+try:
+    import pyworld as pw
+except ImportError:
+    pw = None
 import torch
 import torchaudio as ta
 from lightning import LightningDataModule

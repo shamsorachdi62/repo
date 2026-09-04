@@ -8,9 +8,18 @@ import librosa
 import numpy as np
 import torch
 import torchaudio
-import torchcrepe
-import penn
-import pyworld as pw
+try:
+    import torchcrepe
+except ImportError:
+    torchcrepe = None
+try:
+    import penn
+except ImportError:
+    penn = None
+try:
+    import pyworld as pw
+except ImportError:
+    pw = None
 from scipy.interpolate import interp1d
 
 from optispeech.utils import pylogger, trim_or_pad_to_target_length

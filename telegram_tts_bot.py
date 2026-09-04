@@ -17,7 +17,6 @@ elif os.path.exists("/content"):
 else:
     WORKSPACE_DIR = os.getcwd()
 
-LOCAL_REPO = os.path.join(WORKSPACE_DIR, "repo")
 LOCAL_CHECKPOINTS = os.path.join(WORKSPACE_DIR, "checkpoints")
 LOCAL_ONNX_EXPORT = os.path.join(WORKSPACE_DIR, "onnx_exports")
 LOCAL_AUDIO_OUT = os.path.join(WORKSPACE_DIR, "generated_audio")
@@ -25,11 +24,21 @@ LOCAL_AUDIO_OUT = os.path.join(WORKSPACE_DIR, "generated_audio")
 for d in [LOCAL_CHECKPOINTS, LOCAL_ONNX_EXPORT, LOCAL_AUDIO_OUT]:
     os.makedirs(d, exist_ok=True)
 
+script_dir = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
+if os.path.exists(os.path.join(script_dir, "optispeech")):
+    LOCAL_REPO = script_dir
+elif os.path.exists(os.path.join(WORKSPACE_DIR, "repo", "optispeech")):
+    LOCAL_REPO = os.path.join(WORKSPACE_DIR, "repo")
+elif os.path.exists(os.path.join(WORKSPACE_DIR, "optispeech")):
+    LOCAL_REPO = WORKSPACE_DIR
+else:
+    LOCAL_REPO = os.path.join(WORKSPACE_DIR, "repo")
+
 if os.path.isdir(LOCAL_REPO) and LOCAL_REPO not in sys.path:
     sys.path.insert(0, LOCAL_REPO)
 
 HF_BACKUP_REPO = "Mohamad-I8/tts-training-backup"
-HF_TOKEN = "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"
+HF_TOKEN = os.environ.get("HF_TOKEN", "YOUR_HF_TOKEN_HERE")
 HF_CHECKPOINTS_PREFIX = "checkpoints"
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8616385226:AAHgVZtivsJHWC6HypQUVS5OxqGcgbgQZVc")
 
@@ -130,18 +139,27 @@ def ensure_mantoq_library():
     mantoq_dir = os.path.join(LOCAL_REPO, "optispeech", "text", "mantoq")
     mantoq_lib = os.path.join(mantoq_dir, "lib")
     buck_dir = os.path.join(mantoq_lib, "buck")
-    if not os.path.isdir(buck_dir) or not os.path.exists(os.path.join(buck_dir, "symbols.py")):
-        print("Restoring mantoq linguistic phonemizer library from Hugging Face...")
-        os.makedirs(mantoq_lib, exist_ok=True)
+    if os.path.isdir(buck_dir) and os.path.exists(os.path.join(buck_dir, "symbols.py")):
+        return
+    for candidate in [os.path.join(WORKSPACE_DIR, "optispeech", "text", "mantoq", "lib"), os.path.join(WORKSPACE_DIR, "repo", "optispeech", "text", "mantoq", "lib")]:
+        if os.path.isdir(os.path.join(candidate, "buck")) and os.path.exists(os.path.join(candidate, "buck", "symbols.py")):
+            if not os.path.exists(mantoq_lib):
+                shutil.copytree(candidate, mantoq_lib)
+            return
+    print("Restoring mantoq linguistic phonemizer library from Hugging Face...")
+    os.makedirs(mantoq_lib, exist_ok=True)
+    try:
         z_path = hf_hub_download(
             repo_id=HF_BACKUP_REPO,
             filename="assets/mantoq_lib.zip",
             repo_type="model",
-            token=HF_TOKEN
+            token=HF_TOKEN or None
         )
         with zipfile.ZipFile(z_path, "r") as zf:
             zf.extractall(mantoq_lib)
         print("Mantoq linguistic library restored successfully.")
+    except Exception as e:
+        print(f"Notice: Could not download mantoq_lib from Hugging Face: {e}")
 
 def ensure_diacritizer_model():
     diac_dir = os.path.join(LOCAL_REPO, "optispeech", "text", "mantoq", "diacritizer")

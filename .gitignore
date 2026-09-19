@@ -22,6 +22,7 @@ optispeech/text/mantoq/lib/**/__pycache__/
 optispeech/text/mantoq/diacritizer/**/__pycache__/
 aseel_003772.wav
 scratch/
+test_raw/
 parts/
 sdist/
 var/
@@ -82,6 +83,7 @@ target/
 
 .ipynb_checkpoints
 *.ipynb
+!*grainspeech_training.ipynb
 *bot*.py
 
 # IPython

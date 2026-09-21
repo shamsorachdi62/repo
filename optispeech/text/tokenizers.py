@@ -64,12 +64,12 @@ class MantoqTokenizer(BaseTokenizer):
         return sequence, clean_text
 
     def phonemize_text(self, text: str, language: str=None) -> str:
-        texts, phonemes = mantoq.g2p(text, add_tashkeel=False)
+        texts, phonemes = mantoq.g2p(text, add_tashkeel=True)
         return phonemes, texts
 
     def get_pause_separator_stretch_mask(self, text: str) -> list[bool]:
         """Return whether each word separator may be stretched."""
-        text = mantoq.normalize_input_text(text, add_tashkeel=False)
+        text = mantoq.normalize_input_text(text, add_tashkeel=True)
         standalone_punctuation = {".", ",", "?", "!"}
         words = [word for word in text.split() if word not in standalone_punctuation]
         return [not word.startswith(("ا", "ٱ")) for word in words[1:]]

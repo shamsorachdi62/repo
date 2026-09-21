@@ -1,4 +1,4 @@
-﻿#!/usr/bin/python
+#!/usr/bin/python
 # -*- coding=utf-8 -*-
 """
 Arabic Transliteration routins
@@ -285,20 +285,20 @@ def segment_language(text):
         arabic = False
     actual_text = ""
     for k in text:
-        if re.search("[\u0600-\u06ff]", k):
+        if re.search(r"[\u0600-\u06ff]", k):
             if arabic:
                 actual_text += k
             else:
                 resultlist.append(("latin", actual_text))
                 arabic = True
                 actual_text = k
-        elif re.search("[\s\d\?, :\!\(\)]", k):
+        elif re.search(r"[\s\d\?, :\!\(\)]", k):
             actual_text += k
         else:
             if arabic:
                 i = len(actual_text)
                 temp_text = ""
-                while not re.search("[\u0600-\u06ff]", actual_text[i : i + 1]):
+                while not re.search(r"[\u0600-\u06ff]", actual_text[i : i + 1]):
                     i -= 1
                 temp_text = actual_text[i + 1 :]
                 actual_text = actual_text[: i + 1]
@@ -511,7 +511,7 @@ n~aAsi""".split(
     # test detect language
     text = """السلام عليكم how are you, لم اسمع أخبارك منذ مدة, where are you going"""
     print(arepr(segment_language(text)))
-    text_out = delimite_language(text, start="\RL{", end="}")
+    text_out = delimite_language(text, start=r"\RL{", end="}")
     print(text_out.encode("utf8"))
     text_out = delimite_language(text, start="<arabic>", end="</arabic>")
     print(text_out.encode("utf8"))
